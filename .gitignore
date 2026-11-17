@@ -1,0 +1,10 @@
+# old backups and temporary files
+_to_delete/
+.DS_Store
+# Android Studio / Kotlin build files (regenerated on each build)
+.kotlin/
+*.apk
+# server run results and analysis (copy into the report instead)
+Sources/server/runs/
+Sources/server/analysis/
+__pycache__/

@@ -1,0 +1,154 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="20dp">
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="This phone"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Federated client"
+            android:textColor="@color/muted" />
+
+        <RadioGroup
+            android:id="@+id/client_group"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal">
+
+            <RadioButton
+                android:id="@+id/client_a"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Client A" />
+
+            <RadioButton
+                android:id="@+id/client_b"
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="Client B" />
+        </RadioGroup>
+
+        <TextView
+            android:id="@+id/train_poses"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:background="@color/panel"
+            android:padding="10dp" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Participant ID (who is holding the phone)"
+            android:textColor="@color/muted" />
+
+        <EditText
+            android:id="@+id/participant"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="e.g. hasin"
+            android:importantForAutofill="no"
+            android:inputType="text"
+            android:maxLength="32" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="Server URL (printed when you start fl_server.py)"
+            android:textColor="@color/muted" />
+
+        <EditText
+            android:id="@+id/server_url"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="http://192.168.1.10:8000"
+            android:importantForAutofill="no"
+            android:inputType="textUri" />
+
+        <Button
+            android:id="@+id/test_server"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Save and test connection" />
+
+        <TextView
+            android:id="@+id/server_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:padding="6dp"
+            android:text="Not connected yet."
+            android:textColor="@color/muted" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Data"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/open_record"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:layout_marginTop="8dp"
+            android:text="Record data"
+            android:textSize="18sp" />
+
+        <Button
+            android:id="@+id/open_sessions"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Recorded sessions and data summary" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="16dp"
+            android:text="Federated learning and demo"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/open_train"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:layout_marginTop="8dp"
+            android:text="Federated training"
+            android:textSize="18sp" />
+
+        <Button
+            android:id="@+id/open_predict"
+            android:layout_width="match_parent"
+            android:layout_height="64dp"
+            android:text="Live demo and test mode"
+            android:textSize="18sp" />
+
+        <TextView
+            android:id="@+id/sensors"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:textColor="@color/muted"
+            android:textSize="12sp" />
+
+    </LinearLayout>
+</ScrollView>

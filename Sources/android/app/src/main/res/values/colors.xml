@@ -1,0 +1,10 @@
+<resources>
+    <color name="primary">#1F5FA8</color>
+    <color name="primary_dark">#174A84</color>
+    <color name="ok">#1E8E3E</color>
+    <color name="warn">#B26A00</color>
+    <color name="bad">#C62828</color>
+    <color name="muted">#5F6368</color>
+    <color name="panel">#EEF3F9</color>
+    <color name="launcher_bg">#1F5FA8</color>
+</resources>
