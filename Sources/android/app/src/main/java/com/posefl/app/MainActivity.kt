@@ -20,6 +20,7 @@ class MainActivity : Activity() {
     private lateinit var prefs: AppPrefs
     private lateinit var participant: EditText
     private lateinit var serverUrl: EditText
+    private lateinit var serverPassword: EditText
     private lateinit var serverStatus: TextView
     private lateinit var trainPoses: TextView
     private val ui = Handler(Looper.getMainLooper())
@@ -32,11 +33,13 @@ class MainActivity : Activity() {
 
         participant = findViewById(R.id.participant)
         serverUrl = findViewById(R.id.server_url)
+        serverPassword = findViewById(R.id.server_password)
         serverStatus = findViewById(R.id.server_status)
         trainPoses = findViewById(R.id.train_poses)
 
         participant.setText(prefs.participant)
         serverUrl.setText(prefs.serverUrl)
+        serverPassword.setText(prefs.serverPassword)
 
         val group = findViewById<RadioGroup>(R.id.client_group)
         group.check(if (prefs.clientId == "B") R.id.client_b else R.id.client_a)
@@ -89,6 +92,7 @@ class MainActivity : Activity() {
     private fun savePrefs() {
         prefs.participant = participant.text.toString()
         prefs.serverUrl = serverUrl.text.toString()
+        prefs.serverPassword = serverPassword.text.toString()
         participant.setText(prefs.participant)
     }
 
@@ -102,19 +106,23 @@ class MainActivity : Activity() {
         serverStatus.setTextColor(getColor(R.color.muted))
         serverStatus.text = "Connecting to ${prefs.serverUrl} ..."
         val url = prefs.serverUrl
+        val password = prefs.serverPassword
         val body = JSONObject()
             .put("client_id", prefs.clientId)
             .put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
             .put("participant", prefs.participant)
         io.execute {
             val (ok, msg) = try {
-                val client = ServerClient(url)
+                val client = ServerClient(url, password)
                 val health = client.get("/health")
                 val reg = client.post("/register", body)
                 val tc = reg.getJSONObject("train_config")
                 true to ("Connected. Run ${health.getString("run_id")}, global model v${health.getInt("version")} of " +
                     "${health.getInt("rounds")} rounds, feature set ${tc.getString("feature_set")}." +
                     if (!reg.optBoolean("expected", true)) "\nWarning: the server does not expect client ${prefs.clientId}." else "")
+            } catch (e: ServerException) {
+                false to (if (e.code == 401) "The server is running but the password is wrong or missing. " +
+                    "Enter the password it was started with." else "Server error ${e.code}: ${e.message}")
             } catch (e: Exception) {
                 false to ("Could not reach the server: ${e.message ?: e.javaClass.simpleName}\n" +
                     "Check that fl_server.py is running, the phone and computer are on the same Wi-Fi, " +

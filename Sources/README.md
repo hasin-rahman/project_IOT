@@ -35,6 +35,7 @@ Sources/
 │   ├── analyze_run.py         run folders -> report tables (summary.md, results.csv) and figures
 │   ├── sim_clients.py         two simulated phones (synthetic data) for testing the server
 │   └── test_server.py         server tests (rounds, stale updates, dropout timeout, sweeps)
+├── cloud/                     Google Cloud with HTTPS (§13): setup_caddy.sh, start_server.sh, stop_server.sh
 └── reference/
     ├── posefl_ref/            Python mirror of the phone pipeline (features, model, metrics, synthetic data)
     ├── simulate.py            offline local-vs-federated simulation on synthetic data
@@ -89,6 +90,7 @@ On the app's main screen:
 1. Choose **Client A** on one phone and **Client B** on the other.
 2. Enter a **Participant ID**: the name of whoever is holding the phone. Change it when a different person records.
 3. Enter the **Server URL** that the server printed and tap **Save and test connection**. It should say *Connected*.
+   Leave **Server password** empty unless the server was started with `--password` (for example on Google Cloud, §13).
    The bottom of the screen lists which sensors the phone has.
 
 ## 4. Record data
@@ -279,8 +281,9 @@ scores 100%). All results reported in the project come from real phone recording
 * The models used by the live screen are those of the **last finished run**, so end on the feature set you want
   for the blind test.
 
-* Bring your own Wi-Fi: a phone hotspot or travel router for the Mac and both phones. Campus Wi-Fi often blocks
-  phone-to-laptop connections.
+* Network: the Google Cloud server (§13) works over campus Wi-Fi or mobile data. Test it in the classroom beforehand.
+  As a backup, bring a phone hotspot for the Mac and both phones (campus Wi-Fi often blocks phone-to-laptop
+  connections), with the server ready to start on the Mac.
 * Train the night before, so the models are already saved on both phones; the live screen works with no server.
 * Charge both phones, keep the APK on a third phone, and record a backup video of a full run.
 * Rehearse test mode with people who have never used the app.
@@ -334,3 +337,75 @@ phones compute a new shared key automatically.
 * The server is assumed to follow the protocol and relay the public keys honestly.
 * Sample counts, per-pose counts and the training loss are still sent in the clear.
 
+## 13. Running the server on Google Cloud with HTTPS (Caddy)
+
+With the server on a Google Cloud machine, the phones only need internet access (any Wi-Fi or mobile data), so
+the two phones can train from different places and the Mac can be off. **Caddy** runs on the same machine, gets a
+free HTTPS certificate and passes requests on to the server, so all traffic, including the password, is encrypted.
+HTTPS also protects the secure-aggregation key exchange: nobody in between can swap the phones' public keys.
+
+```
+phones --HTTPS--> Caddy (ports 80/443) --> fl_server.py (127.0.0.1:8000, password required)
+```
+
+The server address is `https://34-1-2-3.sslip.io` for the external IP `34.1.2.3`; the free service sslip.io turns
+that name back into the IP, which is what lets Caddy get a certificate without buying a domain.
+
+### One-time setup (about 30 minutes)
+
+1. **Account.** Sign up at https://cloud.google.com/free (a card is required). The free tier includes one e2-micro
+   machine per month in `us-west1`, `us-central1` or `us-east1`. Check the current limits there, and set a budget
+   alert under **Billing → Budgets & alerts** (for example $1).
+2. **Create the machine.** Console → **Compute Engine → VM instances → Create instance** (enable the Compute Engine
+   API if asked):
+   * Name `posefl-server`, region **us-east1**, machine type **e2-micro**.
+   * Boot disk: **Ubuntu 24.04 LTS**, standard persistent disk, 10 GB.
+   * Firewall: tick **Allow HTTP traffic** and **Allow HTTPS traffic** (Caddy needs both).
+   * Click **Create**, and note the **External IP** in the VM list.
+3. **Upload the files.** Click **SSH** next to the machine. In the window that opens, click **Upload file** and
+   upload these 7 files (from `Sources/server` and `Sources/cloud`):
+   `fl_server.py`, `fedavg.py`, `secure_agg.py`, `config.json`, `setup_caddy.sh`, `start_server.sh`, `stop_server.sh`.
+   Then put them in one folder:
+   ```bash
+   mkdir -p posefl && mv fl_server.py fedavg.py secure_agg.py config.json setup_caddy.sh start_server.sh stop_server.sh posefl/
+   cd posefl
+   ```
+4. **Set up HTTPS** (installs Caddy and gets the certificate; it prints the server address when it works):
+   ```bash
+   bash setup_caddy.sh
+   ```
+
+### Each time you train
+
+1. Open the **SSH** window, then start the server with a password of your choice:
+   ```bash
+   cd posefl
+   bash start_server.sh YOUR_PASSWORD --round-timeout 0
+   ```
+   `--round-timeout 0` makes the first phone wait for the other as long as needed (good when training apart). Other
+   options work as usual: `--secure`, `--sweep sensor_study`, `--sweep secure_study`, `--round-timeout 10` for the
+   dropout test. Running it again restarts the server with the new options; `bash stop_server.sh` stops it. It keeps
+   running after you close the SSH window. `tail -f server.log` shows its output (Ctrl-C to stop watching).
+2. **Phones:** Server URL `https://34-1-2-3.sslip.io` (the address the script printed, starting with `https://`),
+   **Server password**, then **Save and test connection**. Both phones press **Start** on *Federated training*.
+3. **Dashboard:** open the same `https://...` address in a browser and enter the password when asked.
+
+### Getting the results back for the analysis
+
+```bash
+cd ~/posefl && tar czf runs.tgz runs
+```
+In the SSH window click **Download file**, enter `posefl/runs.tgz`. On the Mac, in `Sources/server`:
+`tar xzf ~/Downloads/runs.tgz`, then `python3 analyze_run.py --latest N` as usual.
+
+### When something does not work
+
+| Problem | Fix |
+|---|---|
+| Phone: "the server redirects to https://..." | The URL starts with `http://`; use the `https://` address |
+| Phone: "password is wrong or missing" | Enter the same password the server was started with |
+| Phone: "Could not reach the server" | Check the server is running (`tail server.log`) and the address has no typo |
+| `setup_caddy.sh` says the certificate is not ready | Tick *Allow HTTP traffic* and *Allow HTTPS traffic* on the VM (Edit), wait a minute, run it again. Log: `sudo journalctl -u caddy --no-pager \| tail -30` |
+| The external IP changed (after stopping and starting the VM) | Run `bash setup_caddy.sh` again and use the new address on the phones |
+
+When the project is graded, delete the VM so nothing keeps running on your card.

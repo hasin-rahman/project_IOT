@@ -184,6 +184,35 @@ class SecureAggregationTest(_ServerBase):
         self.assertGreater(a.result["global"]["accuracy"], 0.95)
 
 
+class PasswordTest(unittest.TestCase):
+    def test_requests_need_the_password(self):
+        import json
+        import urllib.request
+        tmp = tempfile.mkdtemp()
+        httpd, state = make_server(config(port=0), tmp, None, password="s3cret")
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        base = f"http://127.0.0.1:{httpd.server_address[1]}"
+        try:
+            def get(path, token=None):
+                req = urllib.request.Request(base + path, headers={"X-Auth-Token": token} if token else {})
+                try:
+                    with urllib.request.urlopen(req, timeout=5) as r:
+                        return r.status, r.read()
+                except urllib.error.HTTPError as e:
+                    return e.code, e.read()
+            self.assertEqual(get("/status")[0], 401)
+            self.assertEqual(get("/status", "wrong")[0], 401)
+            st, body = get("/status", "s3cret")
+            self.assertEqual(st, 200)
+            self.assertNotIn(b"s3cret", body)                        # never shown in the status
+            self.assertEqual(get("/")[0], 200)                         # the dashboard page loads, then asks
+            self.assertEqual(get("/global?client_id=A&token=s3cret")[0], 200)
+            with open(os.path.join(state.run_dir, "config.json")) as fh:
+                self.assertNotIn("s3cret", fh.read())                # never written to the run folder
+        finally:
+            httpd.shutdown()
+
+
 class DropoutTest(_ServerBase):
     CONFIG = {"round_timeout_s": 1.0, "rounds": 6}
 

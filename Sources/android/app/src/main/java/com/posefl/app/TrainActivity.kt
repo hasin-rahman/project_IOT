@@ -124,7 +124,7 @@ class TrainActivity : Activity() {
     private fun start() {
         if (worker?.isAlive == true) return
         val url = prefs.serverUrl
-        val transport = try { HttpTransport(url) } catch (e: IllegalArgumentException) {
+        val transport = try { HttpTransport(url, prefs.serverPassword) } catch (e: IllegalArgumentException) {
             appendLog(e.message ?: "bad server URL"); return
         }
         startButton.isEnabled = false

@@ -34,10 +34,13 @@ from posefl_ref.poses import CLIENT_TRAIN_POSES, N_CLASSES  # noqa: E402
 from posefl_ref.synth import Person, make_session  # noqa: E402
 
 
+PASSWORD = ""   # set with --password when the server requires one
+
+
 def call(base, method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     req = urllib.request.Request(base + path, data=data, method=method,
-                                 headers={"Content-Type": "application/json"})
+                                 headers={"Content-Type": "application/json", "X-Auth-Token": PASSWORD})
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             return r.status, json.loads(r.read())
@@ -183,8 +186,11 @@ class SimPhone(threading.Thread):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--server", default="http://localhost:8000")
+    ap.add_argument("--password", default="", help="the server password, if it has one")
     ap.add_argument("--follow", action="store_true", help="keep training when the server starts new runs (sweeps); Ctrl-C to stop")
     args = ap.parse_args()
+    global PASSWORD
+    PASSWORD = args.password
     phones = [SimPhone(args.server, "A", 1, follow_runs=args.follow), SimPhone(args.server, "B", 2, follow_runs=args.follow)]
     for p in phones:
         p.start()

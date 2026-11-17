@@ -18,6 +18,11 @@ class AppPrefs(context: Context) {
         get() = sp.getString("server_url", "http://192.168.1.10:8000") ?: ""
         set(v) = sp.edit().putString("server_url", v.trim().trimEnd('/')).apply()
 
+    /** Only needed when the server was started with --password (e.g. on a cloud machine). */
+    var serverPassword: String
+        get() = sp.getString("server_password", "") ?: ""
+        set(v) = sp.edit().putString("server_password", v.trim()).apply()
+
     /** Training screen: keep training whenever the server starts a new run (sweeps). */
     var followRuns: Boolean
         get() = sp.getBoolean("follow_runs", false)

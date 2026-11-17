@@ -405,11 +405,12 @@ class PredictActivity : Activity() {
         val names = models.map { it.name }
         val testers = t.trials.map { it.tester }.distinct().joinToString(",")
         val url = prefs.serverUrl
+        val password = prefs.serverPassword
         val client = prefs.clientId
         val summary = t.summary() + String.format(Locale.US, "\nPart A estimate: %.1f / 40", t.rubricPoints())
         Thread {
             val msg = try {
-                val http = HttpTransport(url)
+                val http = HttpTransport(url, password)
                 for (n in names) {
                     http.request("POST", "/metrics", mapOf(
                         "client_id" to client, "model_name" to n, "test_set" to "live_test",

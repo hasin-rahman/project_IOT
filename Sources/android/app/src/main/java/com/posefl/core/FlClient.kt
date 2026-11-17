@@ -17,7 +17,13 @@ interface Transport {
     fun request(method: String, path: String, body: Map<String, Any?>? = null): Map<String, Any?>
 }
 
-class HttpTransport(baseUrl: String, private val connectTimeoutMs: Int = 4_000, private val readTimeoutMs: Int = 15_000) : Transport {
+/** [password]: the server password, if the server was started with one (sent as the X-Auth-Token header). */
+class HttpTransport(
+    baseUrl: String,
+    private val password: String = "",
+    private val connectTimeoutMs: Int = 4_000,
+    private val readTimeoutMs: Int = 15_000,
+) : Transport {
     val base = baseUrl.trim().trimEnd('/')
 
     init {
@@ -31,8 +37,10 @@ class HttpTransport(baseUrl: String, private val connectTimeoutMs: Int = 4_000, 
         try {
             conn.requestMethod = method
             conn.connectTimeout = connectTimeoutMs
+            conn.instanceFollowRedirects = false
             conn.readTimeout = readTimeoutMs
             conn.setRequestProperty("Content-Type", "application/json")
+            if (password.isNotEmpty()) conn.setRequestProperty("X-Auth-Token", password)
             if (body != null) {
                 val bytes = Json.stringify(body).toByteArray(Charsets.UTF_8)
                 conn.doOutput = true
@@ -40,6 +48,12 @@ class HttpTransport(baseUrl: String, private val connectTimeoutMs: Int = 4_000, 
                 conn.outputStream.use { it.write(bytes) }
             }
             val code = conn.responseCode
+            if (code in 300..399) {
+                // e.g. Caddy answers an http:// address with a redirect to https://, which Android does not follow
+                val target = conn.getHeaderField("Location")?.let { Regex("^https?://[^/]+").find(it)?.value ?: it }
+                throw IOException("the server redirects to ${target ?: "another address"}. " +
+                    "Use that address as the server URL (it should start with https://).")
+            }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
             val json = if (text.isNotBlank()) Json.parseObject(text) else emptyMap()

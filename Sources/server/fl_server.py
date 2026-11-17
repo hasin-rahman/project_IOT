@@ -26,6 +26,11 @@ Protocol (all JSON):
     GET  /results                        latest evaluation metrics per client / model / test set
     POST /admin/reset   {optional config overrides}           start a fresh run (new global model)
 
+Password (--password, or the environment variable POSEFL_PASSWORD): needed when the server is on a public
+address, e.g. a cloud machine. Every request must then carry it in the X-Auth-Token header (the phones send
+it automatically once it is entered in the app); otherwise the server answers 401. The dashboard page asks
+for it once and remembers it in that browser. The password is never written to the run folders.
+
 Privacy: every upload is checked against ALLOWED_UPLOAD_FIELDS. A request carrying any other field
 (for example sensor rows or feature vectors) is refused with HTTP 400. Every accepted upload is printed
 to the console, written to runs/<run_id>/uploads.jsonl and shown on the status page.
@@ -46,6 +51,7 @@ When every expected client has called /done for a run, the server starts the nex
 "follow new runs" switched on train again automatically.
 """
 import argparse
+import hmac
 import json
 import os
 import socket
@@ -146,8 +152,9 @@ class ApiError(Exception):
 class FLState:
     """All server state. Every public method is called with self.lock held."""
 
-    def __init__(self, config, runs_dir, sweep=None):
+    def __init__(self, config, runs_dir, sweep=None, password=""):
         self.lock = threading.Lock()
+        self.password = password or ""   # kept out of self.config so it never reaches config.json or /status
         self.runs_dir = runs_dir
         self.clients = {}
         self.traffic = {}
@@ -222,6 +229,11 @@ class FLState:
         if not isinstance(cid, str) or not cid:
             raise ApiError(400, "client_id is required")
         return cid
+
+    def check_password(self, given):
+        """Refuse the request unless it carries the right password (when one is set)."""
+        if self.password and not hmac.compare_digest(str(given or "").encode(), self.password.encode()):
+            raise ApiError(401, "wrong or missing server password")
 
     def touch(self, cid):
         if cid:
@@ -510,6 +522,10 @@ form *{margin-right:8px}svg text{font-size:12px;fill:#5f6368}
 <h1>Phone-pose federated learning</h1><div id=s class=muted>loading...</div>
 <script>
 const C={A:'#2a78d6',B:'#eb6834'};
+// server password: asked once and remembered in this browser
+let TOKEN='';try{TOKEN=localStorage.getItem('posefl_token')||''}catch(e){}
+function api(path,opt){opt=opt||{};opt.headers=Object.assign({'X-Auth-Token':TOKEN},opt.headers||{});return fetch(path,opt)}
+function askPassword(){const t=prompt('This server needs a password:');if(t!==null){TOKEN=t;try{localStorage.setItem('posefl_token',t)}catch(e){}}}
 function row(c,tag){tag=tag||'td';return '<tr>'+c.map(x=>'<'+tag+'>'+x+'</'+tag+'>').join('')+'</tr>'}
 function pct(v){return (typeof v==='number')?(100*v).toFixed(1)+'%':'-'}
 function chart(hist,clients){
@@ -582,12 +598,14 @@ async function reset(ev){
  ev.preventDefault(); const f=ev.target;
  if(!confirm('Start a new run? The current global model is kept on disk, but training starts again from zero.')) return;
  const body={feature_set:f.fs.value,rounds:+f.rounds.value,seed:+f.seed.value,round_timeout_s:+f.to.value,secure_aggregation:f.sec.checked};
- const r=await fetch('/admin/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ const r=await api('/admin/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
  alert(r.ok?'New run started. Phones that are training (or following new runs) pick it up automatically.':'Failed: '+(await r.text()));
 }
 let formShown=false;
 async function load(){
- let s; try{s=await (await fetch('/status')).json();}catch(e){document.getElementById('s').innerHTML='<span class=bad>Server not reachable</span>';return;}
+ let s; try{const r=await api('/status');
+  if(r.status===401){document.getElementById('s').innerHTML='<span class=bad>Wrong or missing server password.</span> <button onclick="askPassword();load()">Enter password</button>';return;}
+  s=await r.json();}catch(e){document.getElementById('s').innerHTML='<span class=bad>Server not reachable</span>';return;}
  const cfg=s.config, exp=cfg.expected_clients;
  const waiting=exp.filter(c=>!s.pending.includes(c));
  let h='<div class=big>Global model v'+s.version+' / '+s.rounds+(s.done?' <span class=ok>&middot; training done</span>':'')+'</div>';
@@ -673,6 +691,8 @@ def make_handler(state):
                 body = json.loads(raw) if raw else {}
                 if isinstance(body, dict):
                     cid = body.get("client_id", cid)
+                if not (method == "GET" and url.path == "/"):   # the dashboard page itself holds no data
+                    state.check_password(self.headers.get("X-Auth-Token") or (query.get("token") or [""])[0])
                 with state.lock:
                     state.touch(cid)
                     if method == "POST":
@@ -758,8 +778,8 @@ def load_config(path, overrides):
     return cfg
 
 
-def make_server(config, runs_dir=None, sweep=None):
-    state = FLState(config, runs_dir or os.path.join(HERE, "runs"), sweep)
+def make_server(config, runs_dir=None, sweep=None, password=""):
+    state = FLState(config, runs_dir or os.path.join(HERE, "runs"), sweep, password)
     httpd = ThreadingHTTPServer((config["host"], config["port"]), make_handler(state))
 
     def ticker():
@@ -801,18 +821,35 @@ def main(argv=None):
                     help="secure aggregation: phones upload masked weights that only make sense once added together")
     ap.add_argument("--sweep", help="queue several runs: 'sensor_study', 'seeds', 'secure_study', or a JSON file with a list of overrides")
     ap.add_argument("--runs-dir", default=os.path.join(HERE, "runs"))
+    ap.add_argument("--password", default=os.environ.get("POSEFL_PASSWORD", ""),
+                    help="require this password on every request (use it when the server is on a public address)")
+    ap.add_argument("--public-url", help="the address to show for the phones, e.g. https://34-1-2-3.sslip.io (behind Caddy)")
+    ap.add_argument("--public-ip", help="the external IP to show for the phones, when they connect to this port directly")
+    ap.add_argument("--host", help="network interface to listen on; 127.0.0.1 = only reachable through Caddy on the same machine")
     args = ap.parse_args(argv)
     cfg = load_config(args.config, {"port": args.port, "rounds": args.rounds, "seed": args.seed,
                                     "feature_set": args.feature_set, "local_epochs": args.local_epochs,
                                     "round_timeout_s": args.round_timeout_s,
-                                    "secure_aggregation": args.secure_aggregation})
+                                    "secure_aggregation": args.secure_aggregation, "host": args.host})
     sweep = load_sweep(args.sweep)
     for o in sweep or []:
         feature_size(o.get("feature_set", cfg["feature_set"]))
-    httpd, _ = make_server(cfg, args.runs_dir, sweep)
-    print(f"\nServer listening on port {cfg['port']}.")
-    print(f"  On the phones, set the server URL to:  http://{lan_ip()}:{cfg['port']}")
-    print(f"  Status page on this computer:         http://localhost:{cfg['port']}/\n")
+    httpd, _ = make_server(cfg, args.runs_dir, sweep, args.password)
+    if args.public_url:
+        url = args.public_url.rstrip("/")
+    else:
+        url = f"http://{args.public_ip or lan_ip()}" + ("" if cfg["port"] == 80 else f":{cfg['port']}")
+    print(f"\nServer listening on {cfg['host']} port {cfg['port']}.")
+    print(f"  On the phones, set the server URL to:  {url}")
+    if args.password:
+        print("  Password required: enter it on the phones (Server password) and on the dashboard.")
+    else:
+        print("  No password set. Use --password when the server is on a public address.")
+    if args.public_url or args.public_ip:
+        print(f"  Dashboard:                            {url}/\n")
+    else:
+        print(f"  Status page on this computer:         http://localhost:{cfg['port']}/")
+        print("  (On Google Cloud, use cloud/start_server.sh instead: see README section 13.)\n")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
