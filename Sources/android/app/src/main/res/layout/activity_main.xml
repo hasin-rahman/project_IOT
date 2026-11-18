@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Home screen: who this phone is, where the server is, then the four steps of the project. -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -7,161 +8,199 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="20dp">
+        android:padding="16dp">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="This phone"
-            android:textSize="20sp"
-            android:textStyle="bold" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Federated client"
-            android:textColor="@color/muted" />
-
-        <RadioGroup
-            android:id="@+id/client_group"
+        <!-- ============ This phone ============ -->
+        <LinearLayout style="@style/Card"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal">
+            android:layout_marginTop="0dp">
 
-            <RadioButton
-                android:id="@+id/client_a"
-                android:layout_width="0dp"
+            <TextView style="@style/SectionTitle"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Client A" />
+                android:text="This phone" />
 
-            <RadioButton
-                android:id="@+id/client_b"
-                android:layout_width="0dp"
+            <RadioGroup
+                android:id="@+id/client_group"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Client B" />
-        </RadioGroup>
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal">
 
-        <TextView
-            android:id="@+id/train_poses"
+                <RadioButton
+                    android:id="@+id/client_a"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Client A"
+                    android:textSize="17sp" />
+
+                <RadioButton
+                    android:id="@+id/client_b"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Client B"
+                    android:textSize="17sp" />
+            </RadioGroup>
+
+            <TextView
+                android:id="@+id/train_poses"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:background="@color/panel"
+                android:padding="10dp" />
+
+            <TextView style="@style/Hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="10dp"
+                android:text="Participant (who is holding the phone)" />
+
+            <EditText
+                android:id="@+id/participant"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="e.g. hasin"
+                android:importantForAutofill="no"
+                android:inputType="text"
+                android:maxLength="32" />
+        </LinearLayout>
+
+        <!-- ============ Server ============ -->
+        <LinearLayout style="@style/Card"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="4dp"
-            android:background="@color/panel"
-            android:padding="10dp" />
+            android:layout_height="wrap_content">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="Participant ID (who is holding the phone)"
-            android:textColor="@color/muted" />
+            <TextView style="@style/SectionTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Server" />
 
-        <EditText
-            android:id="@+id/participant"
+            <TextView style="@style/Hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Address (https://... on Google Cloud, http://... on your Wi-Fi)" />
+
+            <EditText
+                android:id="@+id/server_url"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="https://34-74-134-116.sslip.io"
+                android:importantForAutofill="no"
+                android:inputType="textUri" />
+
+            <TextView style="@style/Hint"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Password (empty if the server has none)" />
+
+            <EditText
+                android:id="@+id/server_password"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:importantForAutofill="no"
+                android:inputType="textPassword" />
+
+            <Button
+                android:id="@+id/test_server"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Save and test connection" />
+
+            <TextView
+                android:id="@+id/server_status"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="4dp"
+                android:text="Not connected yet."
+                android:textColor="@color/muted" />
+        </LinearLayout>
+
+        <!-- ============ 1 · Data ============ -->
+        <LinearLayout style="@style/Card"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="e.g. hasin"
-            android:importantForAutofill="no"
-            android:inputType="text"
-            android:maxLength="32" />
+            android:layout_height="wrap_content">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Server URL (printed by the server: http://... on your Wi-Fi, https://... on Google Cloud)"
-            android:textColor="@color/muted" />
+            <TextView style="@style/SectionTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="1 · Collect data" />
 
-        <EditText
-            android:id="@+id/server_url"
+            <Button style="@style/Button.Primary"
+                android:id="@+id/open_record"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Record data" />
+
+            <Button
+                android:id="@+id/open_sessions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Recorded sessions" />
+        </LinearLayout>
+
+        <!-- ============ 2 · Federated learning ============ -->
+        <LinearLayout style="@style/Card"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="http://192.168.1.10:8000"
-            android:importantForAutofill="no"
-            android:inputType="textUri" />
+            android:layout_height="wrap_content">
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="Server password (only if the server was started with one)"
-            android:textColor="@color/muted" />
+            <TextView style="@style/SectionTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="2 · Learn together" />
 
-        <EditText
-            android:id="@+id/server_password"
+            <Button style="@style/Button.Primary"
+                android:id="@+id/open_train"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Federated training" />
+
+            <TextView style="@style/Hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Trains the local-only model, joins the rounds on the server, then compares the three models." />
+        </LinearLayout>
+
+        <!-- ============ 3 · Use the models ============ -->
+        <LinearLayout style="@style/Card"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="leave empty if the server has no password"
-            android:importantForAutofill="no"
-            android:inputType="textVisiblePassword|textNoSuggestions" />
+            android:layout_height="wrap_content">
 
-        <Button
-            android:id="@+id/test_server"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Save and test connection" />
+            <TextView style="@style/SectionTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="3 · Use the models" />
 
-        <TextView
-            android:id="@+id/server_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:padding="6dp"
-            android:text="Not connected yet."
-            android:textColor="@color/muted" />
+            <Button style="@style/Button.Primary"
+                android:id="@+id/open_predict"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="6dp"
+                android:text="Live demo and blind test" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="Data"
-            android:textSize="20sp"
-            android:textStyle="bold" />
+            <Button style="@style/Button.Primary"
+                android:id="@+id/open_actions"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Pose actions" />
 
-        <Button
-            android:id="@+id/open_record"
-            android:layout_width="match_parent"
-            android:layout_height="64dp"
-            android:layout_marginTop="8dp"
-            android:text="Record data"
-            android:textSize="18sp" />
-
-        <Button
-            android:id="@+id/open_sessions"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:text="Recorded sessions and data summary" />
-
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="16dp"
-            android:text="Federated learning and demo"
-            android:textSize="20sp"
-            android:textStyle="bold" />
-
-        <Button
-            android:id="@+id/open_train"
-            android:layout_width="match_parent"
-            android:layout_height="64dp"
-            android:layout_marginTop="8dp"
-            android:text="Federated training"
-            android:textSize="18sp" />
-
-        <Button
-            android:id="@+id/open_predict"
-            android:layout_width="match_parent"
-            android:layout_height="64dp"
-            android:text="Live demo and test mode"
-            android:textSize="18sp" />
+            <TextView style="@style/Hint"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Pose actions: hold a pose for 3 s and the phone acts on it (Do Not Disturb, desk clock, flashlight, timer)." />
+        </LinearLayout>
 
         <TextView
             android:id="@+id/sensors"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginTop="20dp"
+            android:layout_marginTop="16dp"
             android:textColor="@color/muted"
             android:textSize="12sp" />
 

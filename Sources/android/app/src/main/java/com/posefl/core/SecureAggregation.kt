@@ -96,6 +96,44 @@ object SecureAggregation {
     fun decodeAlone(masked: List<String>, numSamples: Int): DoubleArray =
         DoubleArray(masked.size) { java.lang.Long.parseUnsignedLong(masked[it], 16) / (SCALE * numSamples) }
 
+    // ------------------------------------------------------------------ compressed secure aggregation
+    // Shiv's 8-bit compression combined with the masking above (server/secure_agg.py has the same code).
+    //
+    // Instead of the full weights, the phone sends the CHANGE it made this round (delta = new - global),
+    // multiplied by its share of all training data (weight = n / total), clipped to +-clip and rounded to
+    // one of 255 levels (8 bits). The server announces `clip`, so both phones use the same scale. The two
+    // weighted values add up to at most +-127 levels, so a 16-bit mask is enough: 2 bytes per parameter.
+
+    const val LEVELS = 127
+
+    /** Its own label, so the 16-bit masks never repeat the 64-bit ones. */
+    fun compressedLabel(runId: String, round: Int, attempt: Int) = "cmask|$runId|$round|$attempt"
+
+    /** The upload: base64 of the 16-bit masked numbers, and how many values had to be clipped. */
+    class Compressed(val payload: String, val clipped: Int)
+
+    /** Quantize the weighted change to 8 bits, add (or subtract) a 16-bit mask, and pack it as 2 bytes per parameter. */
+    fun maskCompressed(delta: DoubleArray, weight: Double, clip: Double, key: ByteArray, label: String, addsMask: Boolean): Compressed {
+        val mask = randomWords(key, label, delta.size)
+        val packed = ByteBuffer.allocate(2 * delta.size).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        var clipped = 0
+        for (i in delta.indices) {
+            var d = delta[i]
+            if (kotlin.math.abs(d) > clip) { clipped++; d = if (d > 0) clip else -clip }
+            val level = Math.round(weight * d / clip * LEVELS).toInt()        // a whole number from -127 to 127
+            val m = (mask[i] and 0xFFFF).toInt()                               // a 16-bit mask
+            val masked = (if (addsMask) level + m else level - m) and 0xFFFF   // modulo 2^16
+            packed.putShort(masked.toShort())
+        }
+        return Compressed(java.util.Base64.getEncoder().encodeToString(packed.array()), clipped)
+    }
+
+    /** What ONE compressed masked upload looks like if someone reads it as a change of the weights (noise). */
+    fun decodeCompressedAlone(payload: String, weight: Double, clip: Double): DoubleArray {
+        val bytes = ByteBuffer.wrap(java.util.Base64.getDecoder().decode(payload)).order(java.nio.ByteOrder.LITTLE_ENDIAN)
+        return DoubleArray(bytes.remaining() / 2) { bytes.getShort().toDouble() * clip / LEVELS / weight }
+    }
+
     // ------------------------------------------------------------------ encrypting the relayed local models
 
     /**
@@ -161,6 +199,11 @@ class SecureSession(private val clientId: String, private val otherId: String, p
     fun mask(model: SoftmaxModel, numSamples: Int, round: Int, attempt: Int): List<String> =
         SecureAggregation.maskUpdate(model.W + model.b, numSamples, sharedKey!!,
             SecureAggregation.maskLabel(runId, round, attempt), SecureAggregation.addsMask(clientId, otherId))
+
+    /** Compressed secure aggregation: the 8-bit, 16-bit-masked version of this round's change of the weights. */
+    fun maskCompressed(delta: DoubleArray, weight: Double, clip: Double, round: Int, attempt: Int): SecureAggregation.Compressed =
+        SecureAggregation.maskCompressed(delta, weight, clip, sharedKey!!,
+            SecureAggregation.compressedLabel(runId, round, attempt), SecureAggregation.addsMask(clientId, otherId))
 
     /** Encrypts this phone's local-only model so that only the other phone can read it. */
     fun encryptLocalModel(modelJson: String): Map<String, Any?> =

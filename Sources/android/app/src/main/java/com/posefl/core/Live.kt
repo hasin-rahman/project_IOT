@@ -60,12 +60,38 @@ class LivePredictor(
     }
 
     /** The row indexes of the most recent [windowMs] of data, or null if there are too few samples. */
-    private fun latestWindow(rows: List<DoubleArray>): IntRange? {
-        if (rows.isEmpty()) return null
+    private fun latestWindow(rows: List<DoubleArray>): IntRange? =
+        if (rows.isEmpty()) null else windowEndingAt(rows, rows.last()[0])
+
+    /** The row indexes of the [windowMs] of data ending at time [endMs], or null if there are too few samples. */
+    private fun windowEndingAt(rows: List<DoubleArray>, endMs: Double): IntRange? {
+        var last = rows.size
+        while (last > 0 && rows[last - 1][0] > endMs) last--
+        var first = last
+        while (first > 0 && rows[first - 1][0] > endMs - windowMs) first--
+        return if (last - first < minSamples) null else first until last
+    }
+
+    /**
+     * The blind-test answer of each model (Hasin's and Shiv's ideas combined): the app captures only
+     * once the phone has been still (see PredictActivity), and then, instead of trusting one window,
+     * averages each model's probabilities over the last [windows] 1-second windows, spaced [stepMs]
+     * apart (by default the newest window and the one ending 0.5 s earlier). One bump in one window
+     * can no longer decide the answer on its own. Returns an empty map if there is not enough data.
+     */
+    fun captureAnswers(rows: List<DoubleArray>, models: List<StoredModel>, windows: Int = 2, stepMs: Double = 500.0): Map<String, Pose> {
+        if (rows.isEmpty()) return emptyMap()
         val newest = rows.last()[0]
-        var first = rows.size
-        while (first > 0 && rows[first - 1][0] > newest - windowMs) first--
-        return if (rows.size - first < minSamples) null else first until rows.size
+        val ranges = (0 until windows).mapNotNull { k -> windowEndingAt(rows, newest - k * stepMs) }
+        if (ranges.isEmpty()) return emptyMap()
+        return models.associate { stored ->
+            val average = DoubleArray(Pose.COUNT)
+            for (range in ranges) {
+                val p = stored.model.predictProba(FeatureExtractor.windowFeatures(rows, range, stored.featureSet))
+                for (c in average.indices) average[c] += p[c] / ranges.size
+            }
+            stored.name to Pose.fromIndex(SoftmaxModel.argmax(average))
+        }
     }
 
     /** Moving = the size of the acceleration (in g) varies by more than [movingThresholdG] within the window. */

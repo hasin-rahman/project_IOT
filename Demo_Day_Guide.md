@@ -1,7 +1,9 @@
 # Demo-day guide: Federated Phone-Pose Recognition
 
 CSC 8223 · Hasin Rahman and Shiv Brahmbhatt · written Nov 13, 2026 from the project handout, our proposal and the
-demo-day slides in `Presentation guidlines/`.
+demo-day slides in `Presentation guidlines/`; updated Nov 17 for the combined app (version 0.6), with Shiv's Q&A
+answers from his FedPose version (section 7); updated Nov 18 for version 0.7 (curious-server attack, cost on the
+phones, Pose actions, Compare runs; FedPose import removed).
 
 ## 1. What demo day looks like (from the slides)
 
@@ -61,17 +63,35 @@ Each row is one thing to be able to explain. File paths are under `Sources/andro
 | Privacy rule | `Sources/server/fl_server.py` → `ALLOWED_UPLOAD_FIELDS`, `check_upload_fields`, `record_upload` | The list of fields a phone may send. Anything else is refused. Every upload is printed, saved and shown on the dashboard. |
 | Compare three models | `core/FlClient.kt` → `evaluateAllModels`, `core/Metrics.kt` | The server relays the other phone's local model. Each phone scores all three models on the same recordings and uploads only the scores. |
 | Live prediction | `core/Live.kt` → `LivePredictor.update` | Newest 1-second window → same features → all three models. The live display averages the last 4 windows. |
-| Blind test | `app/PredictActivity.kt` → `startCapture`, `captureWhenStill`, `capture` | Tap → 3 beeps → wait until still for 1 s → record one window → show and log the three answers. |
+| Blind test | `app/PredictActivity.kt` → `startCapture`, `captureWhenStill`, `capture`; `core/Live.kt` → `captureAnswers` | Tap → 3 beeps → wait until still for 1 s → each model's probabilities averaged over the last two 1-second windows → show and log the three answers. (Waiting for stillness is from Hasin's version, averaging windows from Shiv's.) |
 | Practice score | `core/Live.kt` → `LiveTest.rubricPoints` | 30 × global accuracy + 5 × local A on A's poses + 5 × local B on B's poses. |
 | Dropout recovery | `fl_server.py` → `tick`; `FlClient.kt` → `run` (the `IOException` branch and the 409 case) | The server closes a round after 30 s with whatever arrived. A phone that was offline gets "stale", downloads the newest model and continues. |
+| Cost on the phone | `core/DeviceCost.kt` → `CostTracker` (`start`, `addRound`, `finish`, `timePredictions`); called from `FlClient.kt` | A stopwatch for one run: training time per round, feature and prediction time per window, bytes sent and received, battery from the charge counter. Sent as `POST /device_cost`. |
+| Curious-server attack | `server/curious_server.py` → `bias_change_seen_by_server`, `guess_poses`, `score_guess`, `attack_run` | For each upload: bias in the upload − bias of the model the server sent; "went up" = the phone has that pose. Scored out of 6 against the handout's split. |
+| Compare runs | `server/run_summary.py` → `summarize_run`; dashboard section 5 | Reads each run folder and makes one row: mode, accuracies, curious-server score, upload size, phone cost. |
+| Pose actions | `core/PoseActions.kt` → `PoseActionTrigger.update`; `app/PoseActionsActivity.kt` → `decide`, `switchOn`, `switchOff` | Sense → decide → act. On after the same pose for 3 s at ≥75% confidence, off after 1 s out of it. Global / Local A / Local B switch. |
+
+## 3b. Pose actions moment (30 seconds, after the live screen)
+
+1. Phone A → **Pose actions** → select **Local A**, turn the phone upside down and hold it: nothing switches on
+   (Local A never saw Portrait Down; the screen shows what it thinks instead).
+2. Select **Global**, same pose: after 3 s the **flashlight** turns on. "Phone B taught this pose, and its data never
+   left phone B."
+3. Optional: **Local B** + screen down → no Do Not Disturb; **Global** → Do Not Disturb on.
+
+Before the demo: grant *Do Not Disturb access* once (button on the screen), and make sure the last finished run's
+models are on the phone.
 
 ## 4. Core findings to state
 
-Fill in the numbers after the real recordings (none exist yet; everything so far ran on synthetic test data).
+First real run (Nov 17, run_20261117_171543, both S24s, plain FedAvg, acc+grav, 20 rounds): global model 100% on
+both phones' test and validation recordings; local A 49.9–50.0% and local B 50.0–51.2% (100% on their own poses, 0%
+on the other phone's). Phone B's validation and test sets were small (about 85 windows); record more, and add an
+unseen-user test, before quoting final numbers.
 
 1. **Federation gives what local training cannot.** Each local model only knows three poses, so on a six-pose test it
    is right about half the time (about 100% on its own poses, about 0% on the others). The global model has seen
-   neither phone's data, yet recognises all six. On synthetic data: local 50%, global 100%.
+   neither phone's data, yet recognises all six. First real run: local about 50%, global 100%.
 2. **Why a local model is near 0 on unseen poses.** It starts at zero and every training example says "this is one
    of my three poses", so training only ever pushes the scores of the other three poses down. Nothing ever pushes
    them up, so the model never answers them.
@@ -88,11 +108,18 @@ Fill in the numbers after the real recordings (none exist yet; everything so far
 | Topic | Answers |
 |---|---|
 | Sensors, sampling, windows, features, recording screen and label check | Hasin |
-| Server: rounds, FedAvg, storing and relaying models, privacy allow-list and upload log | Hasin |
+| Server: rounds, FedAvg, storing and relaying models, privacy allow-list and upload log, cloud with HTTPS | Hasin |
 | Sensor/feature variations (how the feature sets are built) | Hasin |
 | On-device model and training (softmax, SGD), weight upload and download | Shiv |
 | Evaluation: metrics, three-model comparison, analysis script and plots | Shiv |
+| Blind-test answer averaged over two windows; compression | Shiv (his ideas, combined into the app) |
+| Curious-server attack and the `class_counts` leak we found | Hasin (with secure aggregation) |
+| Cost on the phones (training, prediction, data, battery) | Shiv (with the on-device model) |
+| Pose actions (the IoT loop) | both |
 | Sensor study results and what they mean | both |
+| Two versions built in parallel and combined (learning outcomes) | both |
+
+(This follows the task division in our proposal; change it if you split it differently.)
 
 Likely questions and short answers:
 
@@ -109,69 +136,119 @@ Likely questions and short answers:
 * *What if a phone drops out?* The round closes after the timeout with one update; the late phone is told its update
   is stale and resynchronises.
 
-## 6. Extra credit: secure aggregation with dropout handling (+3 to 5 minutes)
+## 6. Extra credit: private, efficient federated learning on IoT devices (+3 to 5 minutes)
 
-We replaced the three small extras in the proposal (8-bit compression, adaptive participation, dropout recovery)
-with one larger extension, because the handout says several small add-ons do not earn more than one substantial,
-well-evaluated one, and because compressing a 78-number model saves almost nothing. Dropout recovery is kept and
-is part of this extension. The report should state this change.
+**One extension, evaluated three ways** (the handout scores one substantial, well-evaluated extension above several
+small add-ons, out of 40: ambition 10, integration 10, experiments 10, analysis/demo 10):
+
+| Question | How we answer it | Where |
+|---|---|---|
+| Does the server learn less? | **Curious-server attack**: from one plain upload the server names each phone's 3 poses (6/6 every round); with secure aggregation it is at chance (about 3/6). We also found and fixed our own leak: `class_counts` revealed the poses even in secure mode. | `curious_server.py`; dashboard card *Curious server*, section 3 |
+| Is the model as good? | Global accuracy in plain, secure and compressed mode | dashboard section 5 *Compare runs*; `analyze_run.py` |
+| Is it practical on a phone? | **Cost on the phones**: time per round, prediction time, bytes per round (compressed ≈ 4× smaller), battery | phone *Cost on this phone*; dashboard section 4 |
+| Does it survive a phone dropping out? | Dropout: plain averages without it, secure discards and repeats the round | dashboard *Training* (discarded rounds) |
+
+**Pose actions** are not claimed as extra credit on their own: they show what the models are for (an IoT device that
+acts on what it senses) and make "the global model knows poses my phone never trained on" visible in the demo.
+
+Our proposal listed three small extras: 8-bit update compression, adaptive participation and dropout recovery.
+We built them in two versions (Shiv: compression, adaptive participation, dropout; Hasin: secure aggregation,
+dropout) and combined them into one extension, because the handout says several small add-ons do not earn more than
+one substantial, well-evaluated one. Adaptive participation was left out: with two phones, skipping one leaves a
+single client, and the bytes saved are tiny. The report should state these changes.
 
 ### What it does, in plain words
 
-Normally the server sees each phone's weights. With secure aggregation it sees only scrambled numbers, and still
-gets exactly the same average.
+Normally the server sees each phone's weights. With **secure aggregation** it sees only scrambled numbers and still
+gets exactly the same average. **Compressed** secure aggregation does the same with uploads about a quarter of the size.
 
 1. **Shared secret.** Each phone makes a private number and sends the matching public key through the server.
    Each phone combines its private number with the other's public key and both arrive at the same secret
    (Diffie-Hellman). The server only passes public keys along and cannot work the secret out.
-2. **Mask.** Each round, both phones turn the secret into the same list of random numbers. Phone A adds them to
-   its weights, phone B subtracts them.
-3. **Add.** The server adds the two uploads. The random numbers cancel and the real sum is left, which it
-   divides by the total sample count: the FedAvg result.
-4. **Local models.** The local-only models are encrypted with the secret before the server relays them.
-5. **Dropout.** One masked upload on its own is noise, so if a phone is missing the server throws the round
-   away and repeats it; the global model stays as it was.
+2. **Mask.** Each round, both phones turn the secret into the same list of random numbers. Phone A adds them,
+   phone B subtracts them.
+3. **Add.** The server adds the two uploads. The random numbers cancel and the real sum is left: the FedAvg result.
+4. **Compress (Shiv's part).** Instead of its full weights, each phone sends only this round's change, already
+   multiplied by its share of the data, rounded to 8 bits on a scale the server announces. The two rounded values
+   always add up to something that fits in 16 bits, so a 16-bit mask is enough: 2 bytes per number instead of 16
+   hex digits.
+5. **Local models.** The local-only models are encrypted with the secret before the server relays them.
+6. **Dropout.** One masked upload on its own is noise, so if a phone is missing the server throws the round away and
+   repeats it with a new mask; the global model stays as it was. If a phone restarts, both phones agree on a new secret.
 
 ### Where it is in the code
 
 | Step | Where |
 |---|---|
-| Key agreement, masking, encryption on the phone | `core/SecureAggregation.kt` → `sharedKey`, `maskUpdate`, `encrypt`; class `SecureSession` |
-| When the phone does it | `core/FlClient.kt` → `agreeOnKeys`, and the `masked_model` branch of `federatedRound` |
-| Adding the masked uploads | `Sources/server/secure_agg.py` → `sum_masked`; `fl_server.py` → `aggregate` |
+| Key agreement, masking, encryption on the phone | `core/SecureAggregation.kt` → `sharedKey`, `maskUpdate`, `maskCompressed`, `encrypt`; class `SecureSession` |
+| When the phone does it | `core/FlClient.kt` → `agreeOnKeys`, and the secure branches of `federatedRound` |
+| Adding the masked uploads | `Sources/server/secure_agg.py` → `sum_masked`, `sum_compressed`; `fl_server.py` → `aggregate` |
+| The scale for compression | `fl_server.py` → `aggregate` (next `clip` = 1.5 × largest reported change) |
 | Discarding a round | `fl_server.py` → `discard_round` (called from `tick` on timeout) |
 | Refusing plain weights in this mode | `fl_server.py` → `update`, `put_local_model` |
 
 ### Demo (after the main presentation)
 
-1. Dashboard: tick **secure aggregation** in *Start a new run*, start it; **Start** on both phones.
-2. Dashboard → *What the phones upload* → raw JSON: the weights are now 78 hex numbers.
-3. Results: the global model is as accurate as before; the row *One upload, as the server sees it* is at
-   guessing level (in the normal mode it is a working model).
-4. Switch one phone's Wi-Fi off: the dashboard shows the round discarded. Switch it back on: training continues.
+1. SSH window: `bash start_server.sh PASSWORD --secure --compress --round-timeout 10` (or tick **secure aggregation**
+   and **+ compression** on the dashboard's *Start a new run*); **Start** on both phones.
+2. Dashboard → *What the phones upload* → raw JSON: the upload is now a 208-character string of masked numbers.
+3. Results: the global model is as accurate as before; the row *One upload, read by the server* is at guessing level,
+   and the *Curious server* card drops from 6 / 6 (plain run) to about 3 / 6.
+4. Dashboard section 5 *Compare runs*: the plain run and this run side by side (accuracy, curious-server score,
+   upload size, phone cost).
+5. Put one phone in **Airplane mode** (with the cloud server, turning off Wi-Fi alone lets the phone continue over
+   mobile data): the dashboard shows rounds discarded. Airplane mode off: the phone reconnects and training continues.
 
 ### Experiments for the report
 
-Run `python3 fl_server.py --sweep secure_study` (plain and secure, 3 seeds each, both phones following runs), then
-`python3 analyze_run.py --latest 6`. Fill in from real phone runs:
+Run `bash start_server.sh PASSWORD --sweep secure_study` (plain, secure and compressed secure, 3 seeds each; both
+phones tick *Keep following new server runs*), download the runs, then `python3 analyze_run.py --latest 9`.
 
 | Question | Simulated phones (synthetic data) | Real phones |
 |---|---|---|
-| Is accuracy unchanged? | global 100% in both modes | to measure |
-| What can the server read from one upload? | plain: 100% accurate model; secure: 9.7% ± 7.1 (guessing is 16.7%) | to measure |
-| Cost | update 1,886 B plain, 1,767 B masked; no measurable extra time per round | to measure |
-| Dropout | plain averages with one phone; secure discards and repeats the round, then recovers | to measure |
+| Is accuracy unchanged? | global 100% in all three modes | to measure |
+| What can the server read from one upload? | plain: a 100%-accurate model; secure: 19.4% ± 3.9; compressed: 25.3% ± 11.6 (guessing is 16.7%) | to measure |
+| Upload size per round | plain 1,886 B; secure 1,767 B; compressed secure 490 B | to measure |
+| Dropout | plain averages with one phone; both secure modes discard and repeat the round, then recover | to measure |
 
 ### Limits to say out loud
 
 * With only two phones, each phone can work out the other's update from the new global model. The protection
   is against the server.
-* The server is assumed to relay the public keys honestly.
-* Sample counts, per-pose counts and the loss are still sent unmasked.
+* The server is assumed to relay the public keys honestly; HTTPS (Caddy) stops anyone in between from swapping them.
+* The total sample count, the loss and (with compression) the largest change are still sent unmasked. Per-pose counts
+  are not: we found they revealed each phone's poses, so secure mode now leaves them out and the server refuses them.
+* Compression rounds each change to 255 levels; on synthetic data that cost no accuracy.
 
-### Who answers
+## 7. More Q&A answers (from Shiv's FedPose notes, adapted to the combined app)
 
-* Key agreement, masking on the phone (`SecureAggregation.kt`, `FlClient.kt`): Hasin.
-* Adding and discarding on the server, and the comparison results: Shiv.
-(Adjust to however you two actually split it.)
+**Why does federated beat local?** Each phone only saw three of the six poses, so its local model has never been
+told the other three exist. Their scores are only ever pushed down during training, so it gets them wrong every time
+and tops out near 50%. FedAvg combines the two phones' models, so the global model learns all six without either
+phone sharing data.
 
+**Why are mean gravity features enough?** A still pose is defined by which axis of the phone gravity points along:
+plus or minus x, y or z. The six poses sit in different places of that 3D gravity vector, so a linear (softmax)
+model can separate them. The mean over 1 second removes hand jitter; the standard deviation says how steady the
+phone is.
+
+**Why would the gyroscope not help?** It measures rotation speed, not orientation. In a still pose it reads about
+zero for every pose, so it adds noise rather than information. Check whether our sensor study confirms this before
+saying it.
+
+**Why does a local model get unseen poses wrong instead of being unsure?** It never sees those labels, so their
+weights and biases only ever decrease, and it confidently picks one of its own three poses.
+
+**What does the server see?** Model weights (or masked numbers), sample counts, per-pose counts (plain mode only) and
+scores. Never sensor values. The dashboard's upload section proves it, and the server refuses any field not on its list.
+
+**What if one phone drops out?** In normal mode the round times out and the server averages what it has; a late
+upload is rejected as stale and the phone re-syncs. During the outage the global model drifts toward the phone that
+is still training, and recovers when the other returns. In secure mode the round is repeated instead.
+
+**Does compression help?** It cuts each upload to about a quarter, but in absolute terms the saving is small because
+the model has only 78 numbers. Its real value is that secure aggregation no longer makes uploads bigger, and it would
+matter more for larger models.
+
+**Why did you build two versions?** We each built the full pipeline to check each other's design, then combined the
+stronger parts: Hasin's app, server and cloud setup with Shiv's multi-window blind test, 8-bit compression and Q&A notes.

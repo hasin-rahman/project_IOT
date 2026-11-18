@@ -19,6 +19,7 @@ import android.widget.RadioGroup
 import android.widget.Spinner
 import android.widget.TextView
 import com.posefl.core.FeatureExtractor
+import com.posefl.core.LabelCheck
 import com.posefl.core.Pose
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -235,7 +236,7 @@ class RecordActivity : Activity() {
         val holding = holdingKeys[holdingSpinner.selectedItemPosition]
         io.execute {
             val windows = FeatureExtractor.windowRanges(rows).size
-            val match = labelMatch(rows, pose)
+            val match = LabelCheck.matchFraction(rows, pose)
             ui.post { showResult(rows, pose, split, holding, windows, match) }
         }
     }
@@ -247,21 +248,6 @@ class RecordActivity : Activity() {
         state = State.IDLE
         status.text = message
         setControlsEnabled(true)
-    }
-
-    /** Fraction of (trimmed) samples whose gravity direction agrees with the chosen label. */
-    private fun labelMatch(rows: List<DoubleArray>, pose: Pose): Double {
-        if (rows.isEmpty()) return 0.0
-        val t0 = rows.first()[0] + 1000
-        val t1 = rows.last()[0] - 1000
-        var n = 0
-        var ok = 0
-        for (r in rows) {
-            if (r[0] < t0 || r[0] > t1) continue
-            n++
-            if (Pose.guessFromGravity(r[4], r[5], r[6]) == pose) ok++
-        }
-        return if (n == 0) 0.0 else ok.toDouble() / n
     }
 
     private fun showResult(rows: List<DoubleArray>, pose: Pose, split: String, holding: String, windows: Int, match: Double) {

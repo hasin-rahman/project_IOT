@@ -89,6 +89,7 @@ class SimPhone(threading.Thread):
             tc = g["train_config"]
             if g["run_id"] != current_run:  # a new run: rebuild features, train the local-only baseline
                 current_run, finished = g["run_id"], False
+                self.round_ms, self.run_started = [], time.time()
                 spec = tc["feature_set"]
                 hp = dict(lr=tc["lr"], batch_size=tc["batch_size"], l2=tc["l2"])
                 X, y = self.data("train", spec)
@@ -101,7 +102,8 @@ class SimPhone(threading.Thread):
                     # secure aggregation: publish a fresh public key; the local model is uploaded later, encrypted
                     self.private, self.key, self.key_epoch = secure_agg.new_private_key(), None, None
                     call(self.base, "POST", "/pubkey", {"client_id": self.cid, "run_id": current_run,
-                                                        "public_key": secure_agg.public_key(self.private)})
+                                                        "public_key": secure_agg.public_key(self.private),
+                                                        "num_samples": len(y)})
                 else:
                     call(self.base, "POST", "/local_model",
                          {"client_id": self.cid, "model": local.to_dict(spec), "num_samples": len(y)})
@@ -137,10 +139,25 @@ class SimPhone(threading.Thread):
             loss, acc = m.evaluate(X, y)
             update = {
                 "client_id": self.cid, "run_id": g["run_id"], "base_version": g["version"],
-                "num_samples": len(y), "class_counts": np.bincount(y, minlength=N_CLASSES).tolist(),
-                "val_acc": round(val_acc, 4),
+                "num_samples": len(y), "val_acc": round(val_acc, 4),
                 "train_loss": round(loss, 5), "train_acc": round(acc, 4), "train_ms": int(1000 * (time.time() - t0))}
-            if secure:
+            if not secure:
+                # per-pose counts only in plain mode: with secure aggregation they would reveal the phone's poses
+                update["class_counts"] = np.bincount(y, minlength=N_CLASSES).tolist()
+            if secure and tc.get("compression"):
+                if not g.get("total_samples"):
+                    time.sleep(0.05)   # the other phone's sample count is not known yet
+                    continue
+                d, g0 = m.to_dict(spec), g["model"]
+                delta = [new - old for new, old in zip(d["W"] + d["b"], g0["W"] + g0["b"])]
+                payload, clipped = secure_agg.mask_compressed(
+                    delta, len(y) / g["total_samples"], g["clip"], self.key,
+                    secure_agg.compressed_label(g["run_id"], g["version"], g["attempt"]),
+                    secure_agg.adds_mask(self.cid, self.other))
+                update.update(masked_delta={"n_params": len(delta), "payload": payload},
+                              max_abs_delta=max(abs(v) for v in delta), clipped=clipped,
+                              attempt=g["attempt"], key_epoch=self.key_epoch)
+            elif secure:
                 d = m.to_dict(spec)
                 values = secure_agg.mask_update(d["W"] + d["b"], len(y), self.key,
                                                 secure_agg.mask_label(g["run_id"], g["version"], g["attempt"]),
@@ -151,6 +168,8 @@ class SimPhone(threading.Thread):
             else:
                 update["model"] = m.to_dict(spec)
             st, r = call(self.base, "POST", "/update", update)
+            if st == 200:
+                self.round_ms.append(update["train_ms"])
             if st == 409:
                 self.stale_count += 1  # the round moved on without us: download the newest model and continue
 
@@ -180,6 +199,15 @@ class SimPhone(threading.Thread):
             call(self.base, "POST", "/metrics", {"client_id": self.cid, "model_name": name, "feature_set": spec,
                                                  "test_set": "test", "metrics": s})
         self.results_by_run[g["run_id"]] = self.result
+        # what the run cost (a simulator has no battery, so those fields stay empty)
+        t0 = time.perf_counter()
+        for mdl in models.values():
+            mdl.predict(Xt)
+        predict_ms = 1000 * (time.perf_counter() - t0) / max(1, len(yt))
+        call(self.base, "POST", "/device_cost", {
+            "client_id": self.cid, "run_id": g["run_id"], "run_s": round(time.time() - self.run_started, 2),
+            "train_ms_per_round": round(float(np.mean(self.round_ms)), 2) if self.round_ms else None,
+            "predict_ms_per_window": round(predict_ms, 4), "rounds": len(self.round_ms), "charging": False})
         call(self.base, "POST", "/done", {"client_id": self.cid, "run_id": g["run_id"]})
 
 

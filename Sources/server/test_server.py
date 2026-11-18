@@ -7,7 +7,8 @@ import time
 import unittest
 
 from fedavg import fedavg, validate_model, zero_model
-from fl_server import make_server
+import curious_server
+from fl_server import FLState, make_server
 from sim_clients import SimPhone, call
 
 
@@ -17,6 +18,12 @@ def config(**kw):
          "seed": 0, "baseline_epochs": 10, "round_timeout_s": 0, "min_clients": 1}
     c.update(kw)
     return c
+
+
+def call_page(base):
+    import urllib.request
+    with urllib.request.urlopen(base + "/", timeout=5) as r:
+        return r.status
 
 
 class FedAvgTest(unittest.TestCase):
@@ -119,6 +126,24 @@ class ServerTest(_ServerBase):
             self.assertIn(f, files)
         _, s = call(self.base, "GET", "/status")
         self.assertGreater(s["traffic"]["A"]["wire_out"], s["traffic"]["A"]["payload_out"])
+        # device cost: both phones reported it, and it is in the run folder
+        self.assertEqual(sorted(s["device_costs"]), ["A", "B"])
+        self.assertIn("device_cost_A.json", os.listdir(self.state.run_dir))
+        # curious server, plain mode: one upload is enough to name each phone's poses
+        attack = curious_server.attack_run(self.state.run_dir)
+        self.assertEqual(attack["average_score"], 6.0)
+        self.assertTrue(attack["label_counts_visible"])
+        # Compare runs: one summary for this run
+        _, runs = call(self.base, "GET", "/runs")
+        self.assertEqual(runs["current"], self.state.run_id)
+        r = runs["runs"][0]
+        self.assertEqual((r["mode"], r["rounds_done"], r["curious_score"]), ("plain", 5, 6.0))
+        self.assertGreater(r["global_acc"], 0.95)
+        self.assertLess(r["local_A_acc"], 0.6)
+        self.assertGreater(r["upload_bytes"], 1000)
+        self.assertEqual(r["phones_reporting_cost"], 2)
+        # the dashboard page is served
+        self.assertEqual(call_page(self.base), 200)
 
 
 class SecureAggregationTest(_ServerBase):
@@ -149,6 +174,13 @@ class SecureAggregationTest(_ServerBase):
         st, _ = call(self.base, "POST", "/local_model", {"client_id": "A", "model": zero_model(12, 6, "acc+grav")})
         self.assertEqual(st, 400)
 
+    def test_server_refuses_per_pose_counts_when_secure(self):
+        # class_counts would tell the server which poses the phone has, so secure mode refuses them
+        st, r = call(self.base, "POST", "/local_model", {"client_id": "A", "num_samples": 10, "class_counts": [5, 5, 0, 0, 0, 0],
+                                                         "encrypted_model": {"ciphertext": "00", "tag": "00"}})
+        self.assertEqual(st, 400)
+        self.assertIn("class_counts", r["error"])
+
     def test_secure_run_matches_fedavg_accuracy_and_server_sees_no_weights(self):
         phones = [SimPhone(self.base, "A", 1, "acc+grav"), SimPhone(self.base, "B", 2, "acc+grav")]
         for p in phones:
@@ -167,7 +199,12 @@ class SecureAggregationTest(_ServerBase):
         self.assertTrue(any(u["endpoint"] == "/update" for u in uploads))
         for u in uploads:
             self.assertNotIn("model", u["body"])
+            self.assertNotIn("class_counts", u["body"])
         self.assertIn("encrypted_model", self.state.local_models["A"])
+        # curious server: the masked uploads give it nothing better than guessing (3 of 6)
+        attack = curious_server.attack_run(self.state.run_dir)
+        self.assertLess(attack["average_score"], 4.6)
+        self.assertFalse(attack["label_counts_visible"])
 
     def test_dropout_discards_the_round_then_recovers(self):
         # phone B goes silent for 2.5 s before round 2: A's masked update alone is useless, so the round is repeated
@@ -211,6 +248,52 @@ class PasswordTest(unittest.TestCase):
                 self.assertNotIn("s3cret", fh.read())                # never written to the run folder
         finally:
             httpd.shutdown()
+
+
+class CompressedSecureAggregationTest(_ServerBase):
+    CONFIG = {"secure_aggregation": True, "compression": True, "round_timeout_s": 1.0}
+
+    def test_math_masks_cancel_within_one_rounding_step(self):
+        import random
+        import secure_agg as S
+        a, b = S.new_private_key(), S.new_private_key()
+        key = S.shared_key(a, S.public_key(b))
+        da = [random.uniform(-0.5, 0.5) for _ in range(78)]
+        db = [random.uniform(-0.5, 0.5) for _ in range(78)]
+        label = S.compressed_label("run", 2, 0)
+        pa, _ = S.mask_compressed(da, 0.6, 1.0, key, label, True)
+        pb, _ = S.mask_compressed(db, 0.4, 1.0, key, label, False)
+        for got, x, y in zip(S.sum_compressed([pa, pb], 78, 1.0), da, db):
+            self.assertLessEqual(abs(got - (0.6 * x + 0.4 * y)), 1.0 / 127)   # at most one 8-bit step
+        self.assertEqual(len(pa), 208)                                        # 78 x 2 bytes, base64
+        self.assertGreater(max(abs(v) for v in S.decode_compressed_alone(pa, 78, 0.6, 1.0)), 10)   # noise alone
+
+    def test_compression_needs_secure_aggregation(self):
+        with self.assertRaises(ValueError):
+            FLState(config(compression=True, secure_aggregation=False), tempfile.mkdtemp())
+
+    def test_compressed_run_learns_all_poses_and_uploads_are_small(self):
+        phones = [SimPhone(self.base, "A", 1, "acc+grav"), SimPhone(self.base, "B", 2, "acc+grav")]
+        for p in phones:
+            p.start()
+        for p in phones:
+            p.join(timeout=120)
+        self.assertTrue(self.state.done)
+        for p in phones:
+            self.assertGreater(p.result["global"]["accuracy"], 0.95)
+            self.assertLess(p.result[f"local_{p.cid}"]["accuracy"], 0.6)
+        import json
+        with open(os.path.join(self.state.run_dir, "uploads.jsonl")) as fh:
+            updates = [json.loads(line) for line in fh if '"/update"' in line]
+        self.assertTrue(updates)
+        for u in updates:
+            self.assertNotIn("model", u["body"])
+            self.assertNotIn("masked_model", u["body"])
+            self.assertEqual(len(u["body"]["masked_delta"]["payload"]), 208)
+        self.assertTrue(all("clip" in r for r in self.state.history))
+        attack = curious_server.attack_run(self.state.run_dir)
+        self.assertLess(attack["average_score"], 4.6)
+        self.assertFalse(attack["label_counts_visible"])
 
 
 class DropoutTest(_ServerBase):

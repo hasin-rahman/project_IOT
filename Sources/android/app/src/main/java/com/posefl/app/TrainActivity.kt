@@ -11,6 +11,9 @@ import android.widget.Button
 import android.widget.CheckBox
 import android.widget.ScrollView
 import android.widget.TextView
+import android.os.BatteryManager
+import com.posefl.core.BatteryReading
+import com.posefl.core.DeviceCost
 import com.posefl.core.EvalRow
 import com.posefl.core.FeatureSets
 import com.posefl.core.FlListener
@@ -37,6 +40,8 @@ class TrainActivity : Activity() {
     private lateinit var phaseText: TextView
     private lateinit var roundText: TextView
     private lateinit var resultsText: TextView
+    private lateinit var costCard: android.widget.LinearLayout
+    private lateinit var costText: TextView
     private lateinit var logText: TextView
     private lateinit var follow: CheckBox
     private lateinit var startButton: Button
@@ -57,40 +62,59 @@ class TrainActivity : Activity() {
         models = ModelStore(File(filesDir, "models"))
 
         val root = vbox(padding = 16)
-        root.add(label("Client ${prefs.clientId} · ${Build.MODEL} · server ${prefs.serverUrl}", 13f, colorRes = R.color.muted))
-        dataSummary = label("Loading recorded sessions…", 13f, mono = true).apply {
-            background = card(R.color.panel, 8)
-            setPadding(dp(10), dp(10), dp(10), dp(10))
-        }
-        root.add(dataSummary, dp(8))
 
+        // ---- this phone's data ----
+        val dataCard = whiteCard()
+        dataCard.add(sectionTitle("Client ${prefs.clientId} · data on this phone"))
+        dataCard.add(label("${Build.MODEL} · server ${prefs.serverUrl}", 12f, colorRes = R.color.muted))
+        dataSummary = label("Loading recorded sessions…", 12f, mono = true)
+        dataCard.add(dataSummary, dp(6))
+        root.add(dataCard)
+
+        // ---- start / stop ----
+        val controls = whiteCard()
+        val buttons = hbox()
+        startButton = primaryButton("Start") { start() }
+        stopButton = button("Stop") { stop() }.apply { isEnabled = false }
+        buttons.add(startButton, weight = 1f).add(stopButton, weight = 1f)
+        controls.add(buttons)
         follow = CheckBox(this).apply {
-            text = "Keep following new server runs (for the sensor study / seed sweeps)"
+            text = "Keep following new server runs (sweeps)"
             isChecked = prefs.followRuns
             setOnCheckedChangeListener { _, checked -> prefs.followRuns = checked }
         }
-        root.add(follow, dp(8))
+        controls.add(follow, dp(4))
+        controls.add(button("Show what this phone uploaded") { showUploads() })
+        root.add(controls, dp(12))
 
-        val buttons = hbox()
-        startButton = button("Start") { start() }
-        stopButton = button("Stop") { stop() }.apply { isEnabled = false }
-        buttons.add(startButton, weight = 1f).add(stopButton, weight = 1f)
-        root.add(buttons, dp(4))
-        root.add(button("Show what this phone uploaded") { showUploads() }, dp(2))
-
+        // ---- status ----
+        val statusCard = whiteCard()
+        statusCard.add(sectionTitle("Status"))
         phaseText = label("Not started", 22f, bold = true)
-        roundText = label("", 15f, colorRes = R.color.muted)
-        root.add(phaseText, dp(12)).add(roundText)
+        roundText = label("", 14f, colorRes = R.color.muted)
+        statusCard.add(phaseText, dp(4)).add(roundText)
+        root.add(statusCard, dp(12))
 
-        resultsText = label("", 13f, mono = true)
-        root.add(resultsText, dp(8))
+        // ---- results: the three models on this phone's recordings ----
+        val resultsCard = whiteCard()
+        resultsCard.add(sectionTitle("Results"))
+        resultsText = label("Shown when the last round is done.", 12f, mono = true, colorRes = R.color.muted)
+        resultsCard.add(resultsText, dp(4))
+        root.add(resultsCard, dp(12))
 
-        root.add(label("Log", 13f, bold = true, colorRes = R.color.muted), dp(12))
-        logText = label("", 11f, mono = true).apply {
-            background = card(R.color.panel, 8)
-            setPadding(dp(8), dp(8), dp(8), dp(8))
-        }
-        root.add(logText, dp(4))
+        // ---- device cost (hidden until the run is done) ----
+        costCard = whiteCard().apply { visibility = android.view.View.GONE }
+        costCard.add(sectionTitle("Cost on this phone"))
+        costText = label("", 13f)
+        costCard.add(costText, dp(4))
+        root.add(costCard, dp(12))
+
+        // ---- log ----
+        val logCard = whiteCard()
+        logCard.add(sectionTitle("Log"))
+        logText = label("", 11f, mono = true)
+        logCard.add(logText, dp(4))
+        root.add(logCard, dp(12))
         // The whole screen scrolls, so the full results table and the log can be reached on any screen size.
         setContentView(ScrollView(this).apply { addView(root) })
 
@@ -130,7 +154,8 @@ class TrainActivity : Activity() {
         startButton.isEnabled = false
         stopButton.isEnabled = true
         follow.isEnabled = false
-        resultsText.text = ""
+        resultsText.text = "Shown when the last round is done."
+        costCard.visibility = android.view.View.GONE
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         val client = prefs.clientId
         val followRuns = follow.isChecked
@@ -143,6 +168,7 @@ class TrainActivity : Activity() {
                 transport, client, "${Build.MANUFACTURER} ${Build.MODEL}", prefs.participant,
                 { spec -> cache.getOrPut(spec) { LocalData.build(sessions, client, spec) } },
                 models, listener,
+                battery = { readBattery() },
             )
             runner = r
             try {
@@ -212,8 +238,26 @@ class TrainActivity : Activity() {
                     } + "\n")
                 }
             }
-            ui.post { resultsText.text = sb.toString() }
+            ui.post {
+                resultsText.text = sb.toString()
+                resultsText.setTextColor(getColor(android.R.color.black))
+            }
         }
+
+        override fun deviceCost(runId: String, cost: DeviceCost) {
+            ui.post {
+                costText.text = cost.describe() + "\n\nSent to the server for the dashboard (timings and battery only)."
+                costCard.visibility = android.view.View.VISIBLE
+            }
+        }
+    }
+
+    /** The phone's battery: level in %, remaining charge in µAh (if the phone reports it), charging or not. */
+    private fun readBattery(): BatteryReading? {
+        val bm = getSystemService(BatteryManager::class.java) ?: return null
+        val percent = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        val charge = bm.getLongProperty(BatteryManager.BATTERY_PROPERTY_CHARGE_COUNTER)
+        return BatteryReading(percent, if (charge > 0 && charge != Long.MIN_VALUE) charge else null, bm.isCharging)
     }
 
     private fun percent(v: Double?): String = if (v == null) "-" else String.format(Locale.US, "%.1f%%", v * 100)
@@ -224,7 +268,7 @@ class TrainActivity : Activity() {
      */
     private fun showUploads() {
         val text = if (lastUploads.isEmpty()) "Nothing uploaded yet. Press Start first."
-        else listOf("/update", "/local_model", "/metrics", "/register", "/done")
+        else listOf("/update", "/local_model", "/pubkey", "/metrics", "/device_cost", "/register", "/done")
             .mapNotNull { ep -> lastUploads[ep]?.let { "POST $ep  (${it.length} bytes)\n$it" } }
             .joinToString("\n\n")
         val view = label(text, 11f, mono = true).apply { setPadding(dp(16), dp(8), dp(16), dp(8)); setTextIsSelectable(true) }

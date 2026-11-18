@@ -6,14 +6,25 @@ Two Android phones each record their own motion-sensor data, train a small class
 share **only model weights** with a Python server that combines them with FedAvg. Raw sensor data
 and extracted features never leave the phones.
 
-> **Status: version 0.4 (complete system, prepared for demo day).** Recording, on-device training, federated
-> learning with dropout recovery, the live three-model screen with a **blind-test mode** (the judges choose the
-> pose) and a practice mode scored like the demo rubric, **upload evidence** for the privacy rule on the server
-> and on the phone, experiment sweeps for the sensor study, the analysis script for the report, and
-> **secure aggregation** as an optional mode (extra credit, §12).
+> **Status: version 0.7.** Recording, on-device training, federated learning with dropout recovery, the live
+> three-model screen with a **blind-test mode** (the judges choose the pose) and a practice mode scored like the demo
+> rubric, **upload evidence** for the privacy rule on the server and on the phone, experiment sweeps for the sensor
+> study, the analysis script for the report, and the server on **Google Cloud with HTTPS** (§13).
+> Extra credit (§12): **secure aggregation** and **compressed secure aggregation**, evaluated with a
+> **curious-server attack** (what the server can learn from one upload) and the **cost on the phones** (time, data,
+> battery). **Pose actions** (§6) close the IoT loop: the phone acts on the pose it recognises.
+> The dashboard has a **Compare runs** table for plain, secure and compressed runs side by side.
+
+**Who built what.** Two complete versions of the project were built in parallel and then combined into this one:
+Hasin's (`main`: this app, server, dashboard, secure aggregation, cloud setup) and Shiv's FedPose version
+(branch `fedpose`: its own app, Flask server, Python reference with experiment scripts, 8-bit update compression,
+adaptive participation, a multi-window blind test and the demo-day Q&A notes). The combined app keeps Hasin's code
+as the base and adds from Shiv's: the multi-window blind-test answer (§6), the 8-bit compression inside compressed
+secure aggregation (§12) and the demo-day answers (`Demo_Day_Guide.md`). Both phones now record with this app.
+The `fedpose` branch stays in the repository as the record of Shiv's version.
 
 **Quick start:** start the server (§1), install the app on both phones (§2), set them up (§3), record (§4),
-press **Start** on both phones' *Federated training* screen (§5), then open *Live demo and test mode* (§6).
+press **Start** on both phones' *Federated training* screen (§5), then open *Live demo and blind test* (§6).
 
 ## Folder layout
 
@@ -25,12 +36,17 @@ Sources/
 │       ├── core/              pure Kotlin (no Android imports, unit-tested on a laptop):
 │       │                        poses, windowing + features, softmax model, metrics,
 │       │                        FlClient.kt (the federated client), Live.kt (live prediction, blind test, practice score),
-│       │                        SecureAggregation.kt (extra credit), Json.kt
-│       └── app/               Android screens: Main, Record, Sessions, Train (federated), Predict (live demo + test mode)
+│       │                        SecureAggregation.kt (extra credit), DeviceCost.kt (time, data, battery per run),
+│       │                        PoseActions.kt (when an action switches on and off), Json.kt
+│       └── app/               Android screens: Main, Record, Sessions, Train (federated), Predict (live demo + blind
+│                                test), PoseActions (the phone acts on the recognised pose)
 ├── server/
 │   ├── fl_server.py           federated server (Python standard library only)
 │   ├── fedavg.py              sample-weighted Federated Averaging
 │   ├── secure_agg.py          secure aggregation: key agreement, masking, unmasking by adding (extra credit)
+│   ├── curious_server.py      the curious-server attack: which poses can the server guess from one upload?
+│   ├── run_summary.py         one line of numbers per run (the dashboard's Compare runs table)
+│   ├── dashboard.html         the dashboard page the server shows at /
 │   ├── config.json            experiment settings (feature set, rounds, learning rate, ...)
 │   ├── analyze_run.py         run folders -> report tables (summary.md, results.csv) and figures
 │   ├── sim_clients.py         two simulated phones (synthetic data) for testing the server
@@ -52,7 +68,7 @@ Sources/
 | Analysis figures (optional) | `matplotlib` (`pip3 install matplotlib`); without it the tables are still written |
 | Android build | Android Studio (recent version) with its bundled JDK 17+. The project uses Android Gradle Plugin 8.7.3, Gradle 8.11.1, Kotlin 2.0.21 and compileSdk 35. |
 | Phones | Android 8.0 (API 26) or newer with an accelerometer. Set up for the Samsung Galaxy S24 (Android 14 or newer); targetSdk is 34. |
-| Network | The phones and the server computer must be on the same Wi-Fi network. |
+| Network | Server on the Mac: phones and Mac on the same Wi-Fi. Server on Google Cloud (§13): any internet connection. |
 
 ## 1. Start the server (on the Mac)
 
@@ -141,8 +157,9 @@ The phone screen and the dashboard show the round, the global model's validation
 comparison table. Training takes seconds; most of the time is the two phones waiting for each other.
 
 **What is uploaded (privacy evidence).** A phone sends only: the model weights `W` and `b`, the number of training
-windows, the number of windows per pose (`class_counts`), the training loss/accuracy and timing, and at the end
-its accuracy scores. You can show this three ways:
+windows, the number of windows per pose (`class_counts`, plain mode only: secure mode hides it, §12), the training
+loss/accuracy and timing, and at the end its accuracy scores and what the run cost on the phone (time, data, battery).
+You can show this three ways:
 
 * the dashboard section **What the phones upload** shows the latest request of each kind from each phone, with the raw JSON;
 * the server console prints every upload (`upload from A: POST /update, 1948 bytes: ... model{W[72], b[6]} ...`),
@@ -165,7 +182,7 @@ log *"timeout … no update from ['B']"*, turn Wi-Fi back on.
 
 ## 6. Live screen, blind test and practice
 
-Open **Live demo and test mode** on either phone (after training). The top card shows, five times a second, what
+Open **Live demo and blind test** on either phone (after training). The top card shows, five times a second, what
 the **federated global model** and the two **local-only** models predict for the same 1-second sensor window. It
 uses the three models saved on the phone, so it works without the server.
 
@@ -173,8 +190,11 @@ uses the three models saved on the phone, so it works without the server.
 know it.
 
 1. Tap **Capture placement**. Three short beeps give time to put the phone in the pose.
-2. Keep the phone still. As soon as it has been still for 1 second (at most 8 s after the beeps) the app records
-   **one window**, gives a long beep and a vibration, and shows what each of the three models predicted.
+2. Keep the phone still. As soon as it has been still for 1 second (at most 8 s after the beeps) the app takes
+   each model's answer, gives a long beep and a vibration, and shows what each of the three models predicted.
+   The answer is **averaged over the last two 1-second windows** (the newest one and the one ending 0.5 s
+   earlier), so one bump in one window cannot decide it (`LivePredictor.captureAnswers`; the multi-window idea
+   comes from Shiv's version).
 3. The result stays on the screen until the next capture, so a Screen Down placement can be read after picking the
    phone up. Every placement is numbered (1 to 36) and listed below the buttons. **Undo last** removes a mistake;
    **Finish / save** stores the list on the phone (`live_tests/blind_test_*.csv` in app storage).
@@ -185,6 +205,25 @@ keeps the score the way part A of the demo rubric does: 30 × global accuracy on
 on A's poses + 5 × local B accuracy on B's poses. It also counts how often a local model got one of the *other*
 phone's poses right (this should be about 0). **Finish / save** stores the trials on the phone and sends the scores,
 not sensor data, to the server as test set `live_test`.
+
+**Pose actions (the IoT loop: sense → decide → act).** Open **Pose actions**. The phone acts on the pose the chosen
+model recognises: when the model has seen the same pose for **3 seconds** with at least 75% confidence, its action
+switches on; when the phone has been out of that pose for **1 second**, it switches off.
+
+| Pose | Client | Action |
+|---|---|---|
+| Screen Down | A | Do Not Disturb on (the app asks once for *Do Not Disturb access* in Settings) |
+| Screen Up | A | Desk clock: a big clock fills the screen |
+| Portrait Down | B | Flashlight on |
+| Landscape Left | B | A timer starts on the screen |
+| Portrait Up, Landscape Right | | no action |
+
+The switch at the top chooses which model decides: **Global**, **Local A** or **Local B**. A local model only knows
+its own phone's three poses, so it can switch on only two of the four actions; the global model can switch on all
+four. For example, on phone A with *Local A*, turning the phone upside down does nothing (or the wrong thing),
+and with *Global* the flashlight turns on: phone B taught the pose, and its data never left phone B.
+Everything switches off when you leave the screen. Code: `core/PoseActions.kt` (`PoseActionTrigger`, unit-tested)
+and `app/PoseActionsActivity.kt` (`switchOn`, `switchOff`).
 
 ## 7. Experiments for the report
 
@@ -198,7 +237,7 @@ pressing Start: the phones then train again whenever the server starts a new run
 | A single run with other settings | `python3 fl_server.py --feature-set acc+grav+gyro --rounds 30 --seed 1` or the *Start a new run* form on the dashboard |
 | Your own list of runs | `python3 fl_server.py --sweep my_sweep.json` (a JSON list of overrides, e.g. `[{"local_epochs": 5}, {"lr": 0.5}]`) |
 | Dropout | `python3 fl_server.py --round-timeout 10`, then switch a phone's Wi-Fi off and on during training |
-| **Secure aggregation** (extra credit): plain FedAvg and secure aggregation × 3 seeds = 6 runs | `python3 fl_server.py --sweep secure_study` |
+| **Secure aggregation** (extra credit): plain FedAvg, secure aggregation and compressed secure aggregation × 3 seeds = 9 runs | `python3 fl_server.py --sweep secure_study` |
 | Dropout with secure aggregation | `python3 fl_server.py --secure --round-timeout 10`, then switch a phone's Wi-Fi off and on |
 
 A sweep starts the next run as soon as both phones have reported their results, and prints the analysis command at the end.
@@ -229,6 +268,8 @@ per-class recall, the sensor-study table, rounds with a missing phone, round of 
 | `round_timeout_s` | 30 | after the first update of a round arrives, wait this long for the other phone (0 = forever) |
 | `min_clients` | 1 | updates needed to close a round on timeout |
 | `secure_aggregation` | false | phones upload masked weights; the server only learns their average (§12) |
+| `compression` | false | with secure aggregation: 8-bit changes under 16-bit masks, 2 bytes per parameter (§12) |
+| `quant_clip` | 4.0 | compression: the scale of the first round (later rounds follow the reported changes) |
 
 ## 9. Pipeline specification (shared by the Kotlin and Python code)
 
@@ -247,8 +288,8 @@ per-class recall, the sensor-study table, rounds with a missing phone, round of 
   (batch 16, learning rate 0.1, L2 weight 1e-4).
 * **FedAvg:** the server averages the client models' parameters, weighted by each client's number of training windows.
 * **Live prediction:** the same 1 s window, recomputed every 200 ms; each model's class probabilities are averaged over
-  the last 4 windows. Below 40% confidence the live answer is shown in orange (chance is 17%). A captured test placement uses the newest
-  window alone, with no averaging, and always takes each model's top class.
+  the last 4 windows. Below 40% confidence the live answer is shown in orange (chance is 17%). A captured test placement
+  averages each model's probabilities over the newest window and the one ending 0.5 s earlier, and takes the top class.
   The phone counts as moving when the standard deviation of the acceleration magnitude in the window exceeds 0.06 g.
 
 ## 10. Tests and the offline simulation
@@ -258,6 +299,12 @@ cd Sources/server && python3 -m unittest -v test_server
 python3 sim_clients.py                  # with fl_server.py running: two simulated phones over HTTP
 cd ../reference && python3 simulate.py  # offline local-vs-federated comparison (synthetic data)
 ```
+
+The server tests (20) cover rounds, stale updates, the privacy allow-list, dropout, sweeps, the password, secure
+and compressed aggregation, the refusal of per-pose counts in secure mode, the curious-server attack (6/6 in plain
+mode, about chance with secure aggregation), the device-cost upload and the Compare runs summary. The Kotlin JUnit
+tests (`android/app/src/test/.../CoreTest.kt`, 21) cover features, the model, the federated client, the blind test,
+secure aggregation, compression, the pose-action trigger (3 s on, 1 s off) and the cost tracker.
 
 **Kotlin client end to end.** `reference/e2e` runs the app's own `core/` Kotlin code (federated client, live
 predictor, test mode) as two phones against the real server, including a simulated Wi-Fi loss on phone B and a sweep.
@@ -287,6 +334,8 @@ scores 100%). All results reported in the project come from real phone recording
 * Train the night before, so the models are already saved on both phones; the live screen works with no server.
 * Charge both phones, keep the APK on a third phone, and record a backup video of a full run.
 * Rehearse test mode with people who have never used the app.
+* For battery numbers in *Cost on the phones*, unplug the phones during the run (a charging phone reports nothing).
+* Pose actions: grant *Do Not Disturb access* once beforehand (the button on the Pose actions screen).
 
 ## 12. Secure aggregation (extra credit)
 
@@ -315,27 +364,80 @@ In this mode the server refuses plain weights (`model`) in `/update` and `/local
 was. (Plain FedAvg instead averages whatever arrived.) If a phone restarts mid-run it publishes a new key and both
 phones compute a new shared key automatically.
 
+**Compressed secure aggregation** (`--secure --compress`; Hasin's masking combined with Shiv's 8-bit compression).
+Masking with 64-bit numbers makes each upload large. In compressed mode each phone instead sends the *change* of its
+weights this round, multiplied by its share of all training windows (`n_i / total`), clipped to ±`clip` and rounded
+to one of 255 levels (8 bits). The server announces `clip` and `total_samples` with each round, so both phones use the
+same scale. The two weighted values add up to at most ±127 levels, so 16-bit masks are enough: **2 bytes per
+parameter** (the field is `masked_delta`). The server adds the uploads modulo 2^16, the masks cancel, and
+`sum × clip / 127` is the FedAvg change, accurate to one rounding step. Each phone also reports the largest change it
+made (one number, in the clear), and the next round's `clip` is 1.5 × the largest reported change, so the scale
+follows training as the changes get smaller. Values beyond `clip` are clipped and counted (`clipped`).
+Code: `maskCompressed` in `SecureAggregation.kt` / `mask_compressed` in `secure_agg.py`, and `sum_compressed` on the server.
+
+Results with two simulated phones (synthetic data, 3 seeds per mode; to be measured again on the real phones):
+
+| mode | global accuracy | one upload as the server sees it | update size |
+|---|---|---|---|
+| plain FedAvg | 100% | 100% (a working model) | 1,886 B |
+| secure aggregation | 100% | 19.4% ± 3.9 (guessing is 16.7%) | 1,767 B |
+| compressed secure aggregation | 100% | 25.3% ± 11.6 | 490 B |
+
 **How to run it**
 
-* One run: `python3 fl_server.py --secure`, or tick **secure aggregation** in the dashboard's *Start a new run* form.
+* One run: `python3 fl_server.py --secure` (add `--compress` for the compressed mode), or tick **secure aggregation**
+  (and **+ compression**) in the dashboard's *Start a new run* form. On Google Cloud: `bash start_server.sh PASSWORD --secure --compress`.
 * The comparison for the report: `python3 fl_server.py --sweep secure_study` with **Keep following new server runs**
-  ticked on both phones, then `python3 analyze_run.py --latest 6`. The summary gets a table *Secure aggregation
+  ticked on both phones, then `python3 analyze_run.py --latest 9`. The summary gets a table *Secure aggregation
   compared with plain FedAvg*: global accuracy, "one upload as the server sees it", update size, time per round and
-  discarded rounds.
+  discarded rounds, for all three modes.
 
 **What to look at**
 
-* Dashboard → *What the phones upload* → raw JSON of `/update`: 78 hex numbers instead of weights.
+* Dashboard → *What the phones upload* → raw JSON of `/update`: 78 hex numbers instead of weights
+  (compressed mode: a 208-character base64 string, `masked_delta`).
 * Phone → **Show what this phone uploaded**: the same masked numbers.
 * Results on the phone and the dashboard have an extra row `server_sees`: each phone scores its own last upload the
   way the server received it. In plain FedAvg that is a working model; with secure aggregation it is at guessing level.
+
+**Curious-server attack: what can the server learn from one upload?** (`server/curious_server.py`)
+
+The server is assumed to be honest but curious: it runs federated learning correctly but looks closely at what it
+receives. Can it work out **which poses a phone has recorded**? In a round, a phone starts from the global model the
+server sent and trains on its own data, which raises the bias of every pose it has examples of and lowers the others.
+The server knows the model it sent, so it subtracts it from the upload and guesses "the poses whose bias went up".
+Each upload gets a score out of 6 (random guessing: 3).
+
+* Plain FedAvg: **6/6 on every upload** (it names each phone's three poses every round). The per-pose counts
+  (`class_counts`) gave the answer away directly too.
+* Secure aggregation: the upload is masked, so the guess is a coin flip (about 3/6). We found that the phones still
+  sent `class_counts` in this mode, which would have revealed the poses without any attack; in version 0.7 the phones
+  leave it out in secure mode and the server refuses it.
+
+`python3 curious_server.py runs/<run_id>` prints every round's guess and score; the dashboard shows it live
+(card *Curious server* and the *Privacy* section) and in *Compare runs*.
+
+**Cost on the phones** (`core/DeviceCost.kt`). At the end of each run a phone reports what the run cost it: training
+time per round, the local-only model, building the features of one window, classifying one window with the three
+models, bytes sent and received, the whole run's time and the battery used (from the battery's charge counter;
+nothing is measured while the phone is charging). It is shown on the phone (*Cost on this phone*), sent with
+`POST /device_cost` (timings and battery only, on the allow-list) and shown on the dashboard.
+
+**Compare runs.** The dashboard's last table has one row per run: mode, global and local accuracy, what the server
+reads from one upload, the curious-server score, upload size per round, train time per round and battery. Run a plain
+run and a secure + compressed run with the same recordings and they sit next to each other. For the report,
+`analyze_run.py` writes the same comparison (section *Curious server: what one upload reveals, and what it costs on
+the phone*).
 
 **Limits**
 
 * With two clients, each phone can work out the other's update from the new global model. The protection is
   against the server, not against the other client.
 * The server is assumed to follow the protocol and relay the public keys honestly.
-* Sample counts, per-pose counts and the training loss are still sent in the clear.
+* The total number of training windows and the training loss are still sent in the clear (with compression also
+  the largest change per round, one number). The per-pose counts are not: in secure mode the phones leave out
+  `class_counts` and the server refuses it.
+* Compression rounds each weighted change to 255 levels; with the synthetic data this did not change the accuracy.
 
 ## 13. Running the server on Google Cloud with HTTPS (Caddy)
 
@@ -363,11 +465,12 @@ that name back into the IP, which is what lets Caddy get a certificate without b
    * Firewall: tick **Allow HTTP traffic** and **Allow HTTPS traffic** (Caddy needs both).
    * Click **Create**, and note the **External IP** in the VM list.
 3. **Upload the files.** Click **SSH** next to the machine. In the window that opens, click **Upload file** and
-   upload these 7 files (from `Sources/server` and `Sources/cloud`):
-   `fl_server.py`, `fedavg.py`, `secure_agg.py`, `config.json`, `setup_caddy.sh`, `start_server.sh`, `stop_server.sh`.
-   Then put them in one folder:
+   upload these 10 files (from `Sources/server` and `Sources/cloud`):
+   `fl_server.py`, `fedavg.py`, `secure_agg.py`, `curious_server.py`, `run_summary.py`, `dashboard.html`,
+   `config.json`, `setup_caddy.sh`, `start_server.sh`, `stop_server.sh`. Then put them in one folder:
    ```bash
-   mkdir -p posefl && mv fl_server.py fedavg.py secure_agg.py config.json setup_caddy.sh start_server.sh stop_server.sh posefl/
+   mkdir -p posefl && mv fl_server.py fedavg.py secure_agg.py curious_server.py run_summary.py dashboard.html \
+       config.json setup_caddy.sh start_server.sh stop_server.sh posefl/
    cd posefl
    ```
 4. **Set up HTTPS** (installs Caddy and gets the certificate; it prints the server address when it works):
@@ -389,6 +492,18 @@ that name back into the IP, which is what lets Caddy get a certificate without b
 2. **Phones:** Server URL `https://34-1-2-3.sslip.io` (the address the script printed, starting with `https://`),
    **Server password**, then **Save and test connection**. Both phones press **Start** on *Federated training*.
 3. **Dashboard:** open the same `https://...` address in a browser and enter the password when asked.
+
+### When the server code changes
+
+The machine keeps the files you uploaded. After a new version of the code, upload the server files again with
+**Upload file** (they arrive in your home folder), move them over the old ones and restart. For version 0.7 that is
+these six (three of them are new):
+```bash
+mv fl_server.py fedavg.py secure_agg.py curious_server.py run_summary.py dashboard.html ~/posefl/ 2>/dev/null; cd ~/posefl
+bash start_server.sh YOUR_PASSWORD --round-timeout 0
+```
+Earlier runs in `~/posefl/runs/` are kept and appear in the dashboard's *Compare runs* table.
+The phones and the server must be the same version: install the new APK on both phones too.
 
 ### Getting the results back for the analysis
 

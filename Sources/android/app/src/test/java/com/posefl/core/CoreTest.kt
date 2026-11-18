@@ -214,4 +214,130 @@ class CoreTest {
         assertEquals(null, stranger.decryptOtherLocalModel(blob))
         assertTrue(!blob["ciphertext"].toString().contains("1.5"))
     }
+
+    // ---------------- recording screen: the label check ----------------
+
+    @Test
+    fun labelCheckCatchesAWrongLabel() {
+        val rows = session(Pose.PORTRAIT_DOWN, seconds = 6)
+        assertTrue(LabelCheck.matchFraction(rows, Pose.PORTRAIT_DOWN) > 0.95)
+        assertTrue(LabelCheck.matchFraction(rows, Pose.PORTRAIT_UP) < 0.05)
+    }
+
+    @Test
+    fun blindTestAnswerAveragesTheLastTwoWindows() {
+        val sessions = Pose.entries.map { labeled(it, "train", "ann") }
+        val data = LocalData.build(sessions, "all", "acc+grav")
+        val m = SoftmaxModel(12).also { it.train(data.train.X, data.train.y, epochs = 30, rng = java.util.Random(1)) }
+        val models = listOf(StoredModel(ModelNames.GLOBAL, m, "acc+grav", "run", 0L))
+        val predictor = LivePredictor()
+
+        // 3 s of Landscape Left: both windows agree
+        assertEquals(Pose.LANDSCAPE_LEFT, predictor.captureAnswers(session(Pose.LANDSCAPE_LEFT, seconds = 3), models)[ModelNames.GLOBAL])
+
+        // the newest 0.2 s is a bump that points the phone screen-up; averaged with the steady window
+        // before it, the answer stays Landscape Left
+        val rows = session(Pose.LANDSCAPE_LEFT, seconds = 3).map { r ->
+            if (r[0] < 2800) r else r.copyOf().also { it[1] = 0.0; it[2] = 0.0; it[3] = 9.81; it[4] = 0.0; it[5] = 0.0; it[6] = 9.81 }
+        }
+        assertEquals(Pose.LANDSCAPE_LEFT, predictor.captureAnswers(rows, models)[ModelNames.GLOBAL])
+
+        // not enough data: no answer (the screen then falls back to the newest window)
+        assertTrue(predictor.captureAnswers(session(Pose.SCREEN_UP, seconds = 0), models).isEmpty())
+    }
+
+    // ---------------- extra credit: compressed secure aggregation (8-bit changes, 16-bit masks) ----------------
+
+    @Test
+    fun compressedMasksCancelWithinOneRoundingStep() {
+        val a = SecureSession("A", "B", "run1")
+        val b = SecureSession("B", "A", "run1")
+        a.agree(b.publicKey, 2); b.agree(a.publicKey, 2)
+        val rng = java.util.Random(7)
+        val changeA = DoubleArray(78) { rng.nextDouble() - 0.5 }
+        val changeB = DoubleArray(78) { rng.nextDouble() - 0.5 }
+        val upA = a.maskCompressed(changeA, 0.6, 1.0, round = 4, attempt = 0)
+        val upB = b.maskCompressed(changeB, 0.4, 1.0, round = 4, attempt = 0)
+        assertEquals(208, upA.payload.length)                                 // 78 x 2 bytes, base64
+        // the server adds the two uploads modulo 2^16: the masks cancel
+        val da = java.util.Base64.getDecoder().decode(upA.payload)
+        val db = java.util.Base64.getDecoder().decode(upB.payload)
+        for (i in 0 until 78) {
+            val va = (da[2 * i].toInt() and 0xff) or ((da[2 * i + 1].toInt() and 0xff) shl 8)
+            val vb = (db[2 * i].toInt() and 0xff) or ((db[2 * i + 1].toInt() and 0xff) shl 8)
+            val sum = ((va + vb) and 0xFFFF).toShort().toInt()
+            val expected = 0.6 * changeA[i] + 0.4 * changeB[i]
+            assertTrue(abs(sum / 127.0 - expected) <= 1.0 / 127 + 1e-12)     // at most one 8-bit step
+        }
+        // one upload alone is noise, and a change bigger than the scale is clipped (and counted)
+        assertTrue(SecureAggregation.decodeCompressedAlone(upA.payload, 0.6, 1.0).any { abs(it) > 10 })
+        assertEquals(1, a.maskCompressed(DoubleArray(78) { if (it == 0) 3.0 else 0.0 }, 0.5, 1.0, 4, 0).clipped)
+    }
+
+    // ---------------- pose actions (core/PoseActions.kt): 3 s to switch on, 1 s to switch off ----------------
+
+    @Test
+    fun poseActionSwitchesOnAfterThreeSecondsAndOffAfterOne() {
+        val t = PoseActionTrigger()
+        var now = 0L
+        fun feed(pose: Pose, conf: Double, ms: Long): List<PoseActionTrigger.Change> {
+            val out = ArrayList<PoseActionTrigger.Change>()
+            val end = now + ms
+            while (now < end) { t.update(pose, conf, now)?.let { out.add(it) }; now += 200 }
+            return out
+        }
+        // 2.8 s upside down: not yet
+        assertTrue(feed(Pose.PORTRAIT_DOWN, 0.95, 2800).isEmpty())
+        assertTrue(t.holdProgress(now) > 0.8)
+        // a moment later the flashlight switches on
+        val on = feed(Pose.PORTRAIT_DOWN, 0.95, 600)
+        assertEquals(PoseAction.FLASHLIGHT, (on.single() as PoseActionTrigger.Change.Started).action)
+        // a short wobble (0.6 s) does not switch it off
+        assertTrue(feed(Pose.PORTRAIT_UP, 0.95, 600).isEmpty())
+        assertTrue(feed(Pose.PORTRAIT_DOWN, 0.95, 400).isEmpty())
+        // 1 s in another pose switches it off
+        val off = feed(Pose.PORTRAIT_UP, 0.95, 1200)
+        assertEquals(PoseAction.FLASHLIGHT, (off.single() as PoseActionTrigger.Change.Stopped).action)
+        assertEquals(null, t.active)
+    }
+
+    @Test
+    fun poseActionNeedsAConfidentModelAndAPoseWithAnAction() {
+        val t = PoseActionTrigger()
+        for (i in 0..30) assertEquals(null, t.update(Pose.SCREEN_DOWN, 0.6, i * 200L))   // unsure: nothing
+        for (i in 0..30) assertEquals(null, t.update(Pose.PORTRAIT_UP, 0.99, i * 200L))  // no action for Portrait Up
+        assertEquals("A", PoseAction.DO_NOT_DISTURB.client)
+        assertEquals("B", PoseAction.TIMER.client)
+        assertEquals(2, PoseAction.entries.count { it.client == "A" })
+    }
+
+    // ---------------- on-device cost (core/DeviceCost.kt) ----------------
+
+    @Test
+    fun deviceCostCountsTimeBytesAndBattery() {
+        val transport = object : Transport {
+            override fun request(method: String, path: String, body: Map<String, Any?>?) = emptyMap<String, Any?>()
+            override var bytesSent = 1000L
+            override var bytesReceived = 5000L
+        }
+        var reading = BatteryReading(80, 3_000_000, charging = false)
+        val tracker = CostTracker(transport) { reading }
+        tracker.start()
+        tracker.baselineTrained(40.0)
+        tracker.addRound(10.0); tracker.addRound(20.0)
+        transport.bytesSent += 3000; transport.bytesReceived += 7000
+        reading = BatteryReading(79, 2_988_000, charging = false)
+        val cost = tracker.finish(featureMsPerWindow = 0.05, predictMsPerWindow = 0.01)
+        assertEquals(15.0, cost.trainMsPerRound, 1e-9)
+        assertEquals(3000L, cost.bytesSent)
+        assertEquals(7000L, cost.bytesReceived)
+        assertEquals(12.0, cost.batteryUsedMah!!, 1e-9)
+        assertEquals(2, cost.rounds)
+        val upload = cost.toMap("A", "run1")
+        assertEquals(12.0, upload["battery_used_mah"])
+        assertEquals(false, upload["charging"])
+        // timing three tiny models gives a small positive number
+        val m = SoftmaxModel(12)
+        assertTrue(CostTracker.timePredictions(listOf(m, m, m), listOf(DoubleArray(12))) > 0.0)
+    }
 }

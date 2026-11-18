@@ -6,7 +6,8 @@ evaluation metrics, averages client models with FedAvg, and relays models back t
     python3 fl_server.py                      # uses config.json, listens on port 8000
     python3 fl_server.py --port 8080 --rounds 30 --feature-set acc+grav+gyro
 
-Open http://localhost:8000/ in a browser for a live status page.
+Open http://localhost:8000/ in a browser for the dashboard (dashboard.html).
+Server files: fl_server.py (this), fedavg.py, secure_agg.py, curious_server.py, run_summary.py, dashboard.html, config.json.
 
 Protocol (all JSON):
     GET  /health                         liveness + current round
@@ -24,6 +25,8 @@ Protocol (all JSON):
     GET  /status                         full JSON status, including each phone's latest uploads
     GET  /uploads?client_id=A            the exact JSON of the latest upload per endpoint (privacy evidence)
     GET  /results                        latest evaluation metrics per client / model / test set
+    POST /device_cost   {client_id, run_id, train_ms_per_round, battery_used_mah, ...}   what a run cost on the phone
+    GET  /runs                           one summary per run (Compare runs table; see run_summary.py)
     POST /admin/reset   {optional config overrides}           start a fresh run (new global model)
 
 Password (--password, or the environment variable POSEFL_PASSWORD): needed when the server is on a public
@@ -40,6 +43,9 @@ has arrived, the server waits at most round_timeout_s seconds. It then aggregate
 (at least min_clients) and records the missing clients. A late or reconnecting client gets
 409 stale_version, downloads the newest global model and continues. If nobody sends an update,
 the global model simply stays as it is.
+
+Compressed secure aggregation (--secure --compress): the phones send only the change of their weights,
+weighted by their share of the data and rounded to 8 bits, under 16-bit masks: 2 bytes per parameter.
 
 Secure aggregation (--secure, or "secure_aggregation": true): the phones agree on a shared key that
 the server never learns, and upload masked weights. Adding the two uploads cancels the masks, so the
@@ -61,22 +67,28 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
+import run_summary
 import secure_agg
 from fedavg import fedavg, validate_model, zero_model
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 FEATURE_BLOCKS = ["acc", "grav", "gyro", "rot"]
 TRAIN_KEYS = ["local_epochs", "lr", "batch_size", "l2", "seed", "rounds", "feature_set", "baseline_epochs",
-              "secure_aggregation"]
-DEFAULTS = {"round_timeout_s": 30, "min_clients": 1, "secure_aggregation": False}
+              "secure_aggregation", "compression"]
+DEFAULTS = {"round_timeout_s": 30, "min_clients": 1, "secure_aggregation": False,
+            "compression": False,   # with secure aggregation: 8-bit changes and 16-bit masks (secure_agg.py)
+            "quant_clip": 4.0}      # compression: largest change per parameter allowed in the first round
+MIN_CLIP = 0.01                     # compression: the scale never shrinks below this
+CLIP_MARGIN = 1.5                   # compression: next scale = 1.5 x the largest change the phones reported
 SWEEPS = {
     # the required sensor study: 4 feature sets x 3 seeds, everything else fixed
     "sensor_study": [{"feature_set": fs, "seed": seed}
                      for fs in ["acc", "acc+grav", "acc+grav+gyro", "acc+grav+gyro+rot"] for seed in (0, 1, 2)],
     # the baseline repeated with 3 seeds (for mean +/- spread in the report)
     "seeds": [{"seed": seed} for seed in (0, 1, 2)],
-    # extra credit: plain FedAvg vs secure aggregation, 3 seeds each
-    "secure_study": [{"secure_aggregation": secure, "seed": seed} for secure in (False, True) for seed in (0, 1, 2)],
+    # extra credit: plain FedAvg vs secure aggregation vs compressed secure aggregation, 3 seeds each
+    "secure_study": [{"secure_aggregation": secure, "compression": compress, "seed": seed}
+                     for secure, compress in ((False, False), (True, False), (True, True)) for seed in (0, 1, 2)],
 }
 
 
@@ -84,16 +96,22 @@ SWEEPS = {
 # There is no field for raw sensor readings or for feature vectors, so the server cannot receive them.
 MODEL_FIELDS = {"n_features", "n_classes", "feature_set", "W", "b"}
 MASKED_MODEL_FIELDS = {"n_features", "n_classes", "feature_set", "values"}
+MASKED_DELTA_FIELDS = {"n_params", "payload"}
 ENCRYPTED_FIELDS = {"ciphertext", "tag"}
 ALLOWED_UPLOAD_FIELDS = {
     "/register": {"client_id", "device", "participant"},
     "/update": {"client_id", "run_id", "base_version", "num_samples", "class_counts", "model",
                 "train_loss", "train_acc", "train_ms", "val_acc",
-                "masked_model", "attempt", "key_epoch"},          # the last three: secure aggregation
+                "masked_model", "attempt", "key_epoch",            # secure aggregation
+                "masked_delta", "max_abs_delta", "clipped"},       # compressed secure aggregation
     "/local_model": {"client_id", "model", "num_samples", "class_counts", "encrypted_model"},
-    "/pubkey": {"client_id", "run_id", "public_key"},
+    "/pubkey": {"client_id", "run_id", "public_key", "num_samples"},
     "/metrics": {"client_id", "model_name", "test_set", "feature_set", "participant", "metrics"},
     "/done": {"client_id", "run_id"},
+    # what a run cost on the phone: timings, bytes and battery level (no data about the user)
+    "/device_cost": {"client_id", "run_id", "run_s", "feature_ms_per_window", "baseline_train_ms",
+                     "train_ms_per_round", "predict_ms_per_window", "bytes_sent", "bytes_received", "rounds",
+                     "battery_start_pct", "battery_end_pct", "battery_used_mah", "charging"},
 }
 
 
@@ -107,7 +125,7 @@ def check_upload_fields(path, body):
         raise ApiError(400, f"field(s) {extra} are not allowed in {path}: phones may upload only "
                             f"model weights, sample counts and scores")
     for name, fields in (("model", MODEL_FIELDS), ("masked_model", MASKED_MODEL_FIELDS),
-                         ("encrypted_model", ENCRYPTED_FIELDS)):
+                         ("masked_delta", MASKED_DELTA_FIELDS), ("encrypted_model", ENCRYPTED_FIELDS)):
         inner = body.get(name)
         if isinstance(inner, dict):
             extra = sorted(set(inner) - fields)
@@ -123,6 +141,8 @@ def describe_upload(body):
             parts.append(f"model{{W[{len(value.get('W', []))}], b[{len(value.get('b', []))}]}}")
         elif key == "masked_model" and isinstance(value, dict):
             parts.append(f"masked_model{{{len(value.get('values', []))} masked numbers}}")
+        elif key == "masked_delta" and isinstance(value, dict):
+            parts.append(f"masked_delta{{{len(value.get('payload', '')) * 3 // 4} bytes = {value.get('n_params')} x 2-byte masked numbers}}")
         elif key == "encrypted_model" and isinstance(value, dict):
             parts.append(f"encrypted_model{{{len(value.get('ciphertext', '')) // 2} encrypted bytes}}")
         elif key == "public_key":
@@ -167,6 +187,8 @@ class FLState:
 
     # ------------------------------------------------------------------ runs
     def new_run(self, config):
+        if config.get("compression") and not config.get("secure_aggregation"):
+            raise ValueError("compression works together with secure aggregation: use --secure --compress")
         self.config = dict(config)
         self.n_features = feature_size(self.config["feature_set"])
         run_id = time.strftime("run_%Y%m%d_%H%M%S")
@@ -183,12 +205,18 @@ class FLState:
         self.key_epoch = 0        # goes up whenever a phone publishes a new key
         self.attempt = 0          # goes up whenever a round is discarded, so its mask is never reused
         self.discarded = []       # rounds that could not be unmasked because a phone was missing
+        self.sample_counts = {}   # compression: client -> number of training windows (sent with the public key)
+        self.clip = float(self.config.get("quant_clip", 4.0))   # compression: the scale of this round
         self.history = []
         self.metrics_count = 0
         self.local_models = {}
         self.results = {}
         self.finished = set()
         self.traffic = {}  # bytes are counted per run (written to the run folder as traffic.json)
+        self.device_costs = {}   # client -> what the run cost on the phone (time, data, battery)
+        for info in self.clients.values():   # per-run facts about the phones start empty again
+            info.pop("class_counts", None)
+            info.pop("num_samples", None)
         self.run_dir = os.path.join(self.runs_dir, self.run_id)
         os.makedirs(self.run_dir, exist_ok=True)
         self._write("config.json", self.config)
@@ -204,6 +232,15 @@ class FLState:
     @property
     def secure(self):
         return bool(self.config.get("secure_aggregation"))
+
+    @property
+    def compressed(self):
+        return self.secure and bool(self.config.get("compression"))
+
+    def total_samples(self):
+        """Compression: all phones' training windows together, once every expected phone has reported its count."""
+        counts = [self.sample_counts.get(c) for c in self.config["expected_clients"]]
+        return sum(counts) if all(counts) else None
 
     @property
     def done(self):
@@ -287,6 +324,7 @@ class FLState:
         return {"run_id": self.run_id, "version": self.version, "done": self.done,
                 "submitted": sorted(self.pending.keys()),
                 "attempt": self.attempt, "key_epoch": self.key_epoch,
+                **({"clip": self.clip, "total_samples": self.total_samples()} if self.compressed else {}),
                 "model": self.global_model, "train_config": self.train_config()}
 
     def update(self, body):
@@ -306,18 +344,34 @@ class FLState:
             # the server must never receive plain weights in this mode
             if "model" in body:
                 raise ApiError(400, "secure aggregation is on: send masked_model, not model")
+            self.refuse_label_counts(body)
             if body.get("key_epoch") != self.key_epoch:
                 raise ApiError(409, "stale_keys", key_epoch=self.key_epoch)
             if body.get("attempt") != self.attempt:
                 raise ApiError(409, "stale_attempt", attempt=self.attempt)
-            model = body.get("masked_model") or {}
-            try:
-                secure_agg.validate_masked(model.get("values"),
-                                           self.n_features * self.config["n_classes"] + self.config["n_classes"])
-            except ValueError as e:
-                raise ApiError(400, str(e))
+            n_params = self.n_features * self.config["n_classes"] + self.config["n_classes"]
+            if self.compressed:
+                if "masked_model" in body or not isinstance(body.get("masked_delta"), dict):
+                    raise ApiError(400, "compression is on: send masked_delta")
+                if n != self.sample_counts.get(cid):
+                    raise ApiError(400, "num_samples differs from the count sent with the public key")
+                if not isinstance(body.get("max_abs_delta"), (int, float)):
+                    raise ApiError(400, "max_abs_delta is required with compression")
+                model = body["masked_delta"]
+                try:
+                    secure_agg.validate_compressed(model.get("payload"), n_params)
+                except ValueError as e:
+                    raise ApiError(400, str(e))
+            else:
+                if "masked_delta" in body:
+                    raise ApiError(400, "compression is off: send masked_model")
+                model = body.get("masked_model") or {}
+                try:
+                    secure_agg.validate_masked(model.get("values"), n_params)
+                except ValueError as e:
+                    raise ApiError(400, str(e))
         else:
-            if "masked_model" in body:
+            if "masked_model" in body or "masked_delta" in body:
                 raise ApiError(400, "secure aggregation is off: send model, not masked_model")
             model = body.get("model") or {}
             try:
@@ -326,11 +380,14 @@ class FLState:
                 raise ApiError(400, str(e))
         if not self.pending:
             self.round_first_at = time.time()
-        if isinstance(body.get("class_counts"), list):
-            self.clients.setdefault(cid, {})["class_counts"] = body["class_counts"]
+        info = self.clients.setdefault(cid, {})
+        info["num_samples"] = n
+        if isinstance(body.get("class_counts"), list):   # plain mode only (refused with secure aggregation)
+            info["class_counts"] = body["class_counts"]
         self.pending[cid] = {"model": model, "num_samples": n,
                              "train_loss": body.get("train_loss"), "train_acc": body.get("train_acc"),
                              "train_ms": body.get("train_ms"), "val_acc": body.get("val_acc"),
+                             "max_abs_delta": body.get("max_abs_delta"), "clipped": body.get("clipped"),
                              "received_at": time.time()}
         va = body.get("val_acc")
         self.log(f"round {self.version}: update from {cid} ({n} samples, loss={body.get('train_loss')}"
@@ -340,6 +397,13 @@ class FLState:
             self.aggregate()
             aggregated = True
         return {"accepted": True, "aggregated": aggregated, "version": self.version, "done": self.done}
+
+    def refuse_label_counts(self, body):
+        """Secure aggregation hides which poses a phone has, so the per-pose counts (which would give
+        that away directly) must not be sent either. Only the total number of windows is allowed."""
+        if "class_counts" in body:
+            raise ApiError(400, "secure aggregation is on: class_counts would reveal which poses this phone has; "
+                                "send only num_samples")
 
     def tick(self):
         """Called about twice a second: closes a round whose timeout has expired (client dropout)."""
@@ -371,7 +435,19 @@ class FLState:
     def aggregate(self):
         clients = sorted(self.pending.keys())
         missing = [c for c in self.config["expected_clients"] if c not in self.pending]
-        if self.secure:
+        clip_used = self.clip
+        if self.compressed:
+            # add the compressed masked changes: the masks cancel and the FedAvg change is left
+            n_w = self.n_features * self.config["n_classes"]
+            flat_old = self.global_model["W"] + self.global_model["b"]
+            change = secure_agg.sum_compressed([self.pending[c]["model"]["payload"] for c in clients],
+                                               len(flat_old), self.clip)
+            flat = [w + d for w, d in zip(flat_old, change)]
+            W, b = flat[:n_w], flat[n_w:]
+            # next round's scale follows the largest change the phones reported (one number each, in the clear)
+            largest = max(self.pending[c]["max_abs_delta"] for c in clients)
+            self.clip = max(MIN_CLIP, CLIP_MARGIN * largest)
+        elif self.secure:
             # add the masked uploads: the masks cancel and the sample-weighted average is left
             total = sum(self.pending[c]["num_samples"] for c in clients)
             flat = secure_agg.sum_masked([self.pending[c]["model"]["values"] for c in clients], total)
@@ -384,8 +460,10 @@ class FLState:
         record = {"round": self.version, "new_version": self.version + 1, "time": time.time(), "clients": clients,
                   "missing": missing,
                   "duration_s": round(time.time() - self.round_first_at, 3) if self.round_first_at else None,
+                  **({"clip": clip_used} if self.compressed else {}),
                   **{f"{k}_{c}": self.pending[c][k] for c in clients
-                     for k in ("num_samples", "train_loss", "train_acc", "train_ms", "val_acc")}}
+                     for k in ("num_samples", "train_loss", "train_acc", "train_ms", "val_acc", "clipped")
+                     if k != "clipped" or self.compressed}}
         self.history.append(record)
         self._append("rounds.jsonl", record)
         self.version += 1
@@ -393,7 +471,8 @@ class FLState:
         self.round_first_at = None
         self._write(f"global_v{self.version}.json", self.global_model)
         self._write("traffic.json", self.traffic)
-        self.log(("Secure aggregation" if self.secure else "FedAvg") + f" over {clients} -> global v{self.version}"
+        mode = "Compressed secure aggregation" if self.compressed else "Secure aggregation" if self.secure else "FedAvg"
+        self.log(mode + f" over {clients} -> global v{self.version}"
                  + ("  (all rounds done)" if self.done else ""))
 
     def put_local_model(self, body):
@@ -401,6 +480,7 @@ class FLState:
         entry = {"num_samples": body.get("num_samples"), "uploaded_at": time.time(), "run_id": self.run_id}
         if self.secure:
             # relayed as an encrypted blob that only the other phone can open
+            self.refuse_label_counts(body)
             blob = body.get("encrypted_model")
             if "model" in body or not isinstance(blob, dict) or not isinstance(blob.get("ciphertext"), str):
                 raise ApiError(400, "secure aggregation is on: send encrypted_model, not model")
@@ -426,6 +506,8 @@ class FLState:
         key = body.get("public_key")
         if not isinstance(key, str) or not key:
             raise ApiError(400, "public_key is required")
+        if isinstance(body.get("num_samples"), int) and body["num_samples"] > 0:
+            self.sample_counts[cid] = body["num_samples"]
         if self.public_keys.get(cid) != key:
             self.public_keys[cid] = key
             self.key_epoch += 1
@@ -459,6 +541,17 @@ class FLState:
                  f"acc={m.get('accuracy')} macroF1={m.get('macro_f1')}")
         return {"ok": True}
 
+    def put_device_cost(self, body):
+        """What the run cost on a phone (time, data, battery), shown on the dashboard and in Compare runs."""
+        cid = self._require_client(body)
+        if body.get("run_id") != self.run_id:
+            return {"ok": True, "ignored": "old run"}
+        self.device_costs[cid] = dict(body, received_at=time.time())
+        self._write(f"device_cost_{cid}.json", self.device_costs[cid])
+        self.log(f"device cost from {cid}: {body.get('train_ms_per_round')} ms per round, "
+                 f"{body.get('predict_ms_per_window')} ms per prediction, battery {body.get('battery_used_mah')} mAh")
+        return {"ok": True}
+
     def done_client(self, body):
         cid = self._require_client(body)
         if body.get("run_id") != self.run_id:
@@ -484,7 +577,10 @@ class FLState:
                 cfg[k] = v
         feature_size(cfg["feature_set"])  # validate
         self.sweep = []
-        self.new_run(cfg)
+        try:
+            self.new_run(cfg)
+        except ValueError as e:
+            raise ApiError(400, str(e))
         return {"ok": True, "run_id": self.run_id, "config": self.config}
 
     def status(self):
@@ -500,148 +596,23 @@ class FLState:
             "clients": {c: dict(v, seconds_since_seen=round(now - v.get("last_seen", now), 1))
                         for c, v in self.clients.items()},
             "local_models": sorted(self.local_models.keys()),
-            "secure": self.secure, "discarded_rounds": self.discarded[-20:],
-            "uploads": self.uploads,
+            "secure": self.secure, "compressed": self.compressed, "discarded_rounds": self.discarded[-20:],
+            "uploads": self.uploads, "device_costs": self.device_costs,
             "history": self.history[-50:], "traffic": self.traffic, "metrics_received": self.metrics_count,
         }
 
 
-STATUS_HTML = """<!doctype html><html><head><meta charset=utf-8><title>FL server</title>
-<meta name=viewport content="width=device-width,initial-scale=1">
-<style>
-body{font:15px system-ui,sans-serif;margin:24px auto;max-width:1000px;padding:0 16px;color:#202124}
-h1{font-size:22px;margin:0 0 4px}h2{font-size:16px;margin:26px 0 6px}
-td,th{padding:4px 10px;text-align:left;border-bottom:1px solid #e3e3e3}th{color:#5f6368;font-weight:500}
-table{border-collapse:collapse;margin:6px 0 10px}.big{font-size:26px;font-weight:650}
-.muted{color:#5f6368}.ok{color:#1e8e3e}.warn{color:#b26a00}.bad{color:#c62828}
-.pill{display:inline-block;padding:2px 10px;border-radius:12px;background:#eef3f9;margin-right:6px}
-.best{font-weight:700}pre{max-height:260px;overflow:auto;background:#f6f8fb;padding:8px;border-radius:6px;font-size:12px;max-width:560px}
-summary{cursor:pointer;color:#1F5FA8}td{vertical-align:top}form{background:#f6f8fb;padding:10px 12px;border-radius:8px;display:inline-block}
-form *{margin-right:8px}svg text{font-size:12px;fill:#5f6368}
-</style></head><body>
-<h1>Phone-pose federated learning</h1><div id=s class=muted>loading...</div>
-<script>
-const C={A:'#2a78d6',B:'#eb6834'};
-// server password: asked once and remembered in this browser
-let TOKEN='';try{TOKEN=localStorage.getItem('posefl_token')||''}catch(e){}
-function api(path,opt){opt=opt||{};opt.headers=Object.assign({'X-Auth-Token':TOKEN},opt.headers||{});return fetch(path,opt)}
-function askPassword(){const t=prompt('This server needs a password:');if(t!==null){TOKEN=t;try{localStorage.setItem('posefl_token',t)}catch(e){}}}
-function row(c,tag){tag=tag||'td';return '<tr>'+c.map(x=>'<'+tag+'>'+x+'</'+tag+'>').join('')+'</tr>'}
-function pct(v){return (typeof v==='number')?(100*v).toFixed(1)+'%':'-'}
-function chart(hist,clients){
- const W=640,H=230,L=40,R=14,T=12,B=40,n=hist.length;
- if(!n) return '<p class=muted>No rounds yet. Each phone reports how well the current global model does on its own validation data.</p>';
- const x=i=>L+(n<2?0:(W-L-R)*i/(n-1)), y=v=>T+(H-T-B)*(1-v);
- let g='<svg width='+W+' height='+H+'>';
- for(const v of [0,.25,.5,.75,1]) g+='<line x1='+L+' x2='+(W-R)+' y1='+y(v)+' y2='+y(v)+' stroke=#e6e5e1 /><text x=4 y='+(y(v)+4)+'>'+(v*100)+'%</text>';
- const ticks=[...new Set([0,Math.round((n-1)/2),n-1])];
- for(const i of ticks) g+='<text x='+(x(i)-4)+' y='+(H-B+16)+'>'+hist[i].round+'</text>';
- g+='<text x='+(W/2-70)+' y='+(H-4)+'>round (global model version)</text>';
- let legend='';
- clients.forEach((c,ci)=>{
-  const pts=hist.map((r,i)=>[i,r['val_acc_'+c]]).filter(p=>typeof p[1]==='number');
-  if(!pts.length) return;
-  g+='<polyline fill=none stroke-width=2 stroke='+C[c]+(ci?' stroke-dasharray="6 4"':'')+' points="'+pts.map(p=>x(p[0])+','+y(p[1])).join(' ')+'"/>';
-  const l=pts[pts.length-1];
-  legend+='<span class=pill><svg width=22 height=10><line x1=0 x2=22 y1=5 y2=5 stroke-width=2 stroke='+C[c]+(ci?' stroke-dasharray="6 4"':'')+' /></svg> phone '+c+': <b>'+pct(l[1])+'</b></span>';
- });
- return '<div>'+legend+'</div>'+g+'</svg><div class=muted>Accuracy of global model v<i>k</i> on each phone&rsquo;s validation set, measured on the phone before it trains round <i>k</i>.</div>';
-}
-function results(rs){
- if(!rs.length) return '<p class=muted>No evaluation results yet. Phones report them when the last round is done.</p>';
- const sets=[...new Set(rs.map(r=>r.client_id+' / '+r.test_set))].sort();
- const order=['local_A','local_B','global','server_sees'], names={local_A:'Client A local',local_B:'Client B local',global:'Federated global',server_sees:'One upload, as the server sees it'};
- let h='<table><tr><th>model</th>'+sets.map(s=>'<th>'+s+'<br><span class=muted>acc &middot; macro-F1</span></th>').join('')+'</tr>';
- for(const m of order){
-  if(m==='server_sees'&&!rs.some(r=>r.model_name===m)) continue;
-  const cells=sets.map(s=>{const r=rs.find(r=>r.client_id+' / '+r.test_set===s&&r.model_name===m);
-   if(!r) return '-'; const mm=r.metrics; return pct(mm.accuracy)+' &middot; '+(mm.macro_f1??0).toFixed(3)+' <span class=muted>(n='+(mm.n??'?')+')</span>';});
-  h+=row(['<b>'+names[m]+'</b>'].concat(cells));
- }
- return h+'</table>';
-}
-const POSES=['Screen Up','Screen Down','Portrait Up','Portrait Down','Landscape Left','Landscape Right'];
-function esc(t){return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;')}
-function recall(rs){
- // per-pose recall of each model on each phone's test recordings (falls back to validation)
- let h='';
- for(const c of [...new Set(rs.map(r=>r.client_id))].sort()){
-  const set=['test','val','live_test'].find(t=>rs.some(r=>r.client_id===c&&r.test_set===t)); if(!set) continue;
-  h+='<p class=muted>Recall per pose, measured on phone '+c+' ('+set+' recordings). Poses 1&ndash;3 are client A&rsquo;s training poses, 4&ndash;6 are client B&rsquo;s.</p><table>'+row(['model'].concat(POSES),'th');
-  for(const m of ['local_A','local_B','global','server_sees']){
-   const r=rs.find(r=>r.client_id===c&&r.test_set===set&&r.model_name===m); if(!r||!r.metrics.per_class_recall) continue;
-   h+=row(['<b>'+({local_A:'Client A local',local_B:'Client B local',global:'Federated global',server_sees:'One upload, as the server sees it'})[m]+'</b>']
-     .concat(r.metrics.per_class_recall.map(v=>'<span class='+(v>=.9?'ok':v<=.1?'bad':'warn')+'>'+pct(v)+'</span>')));
-  }
-  h+='</table>';
- }
- return h;
-}
-const openIds=new Set();
-function tog(d){if(d.open)openIds.add(d.id);else openIds.delete(d.id)}
-function uploads(up){
- const cs=Object.keys(up).filter(c=>c!=='-').sort();
- if(!cs.length) return '<p class=muted>Nothing uploaded yet.</p>';
- let h='<p class=muted>The latest request of each kind from each phone, exactly as it arrived. The server refuses any field that is not on its allow-list, so sensor readings and feature vectors cannot be uploaded.</p>';
- for(const c of cs){
-  h+='<table>'+row(['phone '+c,'when','size','what it contains'],'th');
-  for(const ep of ['/update','/local_model','/metrics','/register','/done']){
-   const u=up[c][ep]; if(!u) continue; const id='u_'+c+ep.replace('/','_');
-   h+=row(['<b>POST '+ep+'</b>',new Date(u.time*1000).toLocaleTimeString(),u.bytes+' B',
-    esc(u.summary)+'<details id='+id+(openIds.has(id)?' open':'')+' ontoggle="tog(this)"><summary>show the raw JSON</summary><pre>'+esc(JSON.stringify(u.body,null,1))+'</pre></details>']);
-  }
-  h+='</table>';
- }
- return h;
-}
-async function reset(ev){
- ev.preventDefault(); const f=ev.target;
- if(!confirm('Start a new run? The current global model is kept on disk, but training starts again from zero.')) return;
- const body={feature_set:f.fs.value,rounds:+f.rounds.value,seed:+f.seed.value,round_timeout_s:+f.to.value,secure_aggregation:f.sec.checked};
- const r=await api('/admin/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
- alert(r.ok?'New run started. Phones that are training (or following new runs) pick it up automatically.':'Failed: '+(await r.text()));
-}
-let formShown=false;
-async function load(){
- let s; try{const r=await api('/status');
-  if(r.status===401){document.getElementById('s').innerHTML='<span class=bad>Wrong or missing server password.</span> <button onclick="askPassword();load()">Enter password</button>';return;}
-  s=await r.json();}catch(e){document.getElementById('s').innerHTML='<span class=bad>Server not reachable</span>';return;}
- const cfg=s.config, exp=cfg.expected_clients;
- const waiting=exp.filter(c=>!s.pending.includes(c));
- let h='<div class=big>Global model v'+s.version+' / '+s.rounds+(s.done?' <span class=ok>&middot; training done</span>':'')+'</div>';
- h+='<p><span class=pill>run '+s.run_id+'</span><span class=pill>features <b>'+cfg.feature_set+'</b> ('+s.n_params+' parameters)</span>'+
-   '<span class=pill>'+cfg.local_epochs+' local epoch(s), lr '+cfg.lr+', seed '+cfg.seed+'</span>'+
-   (s.secure?'<span class=pill style="background:#e3f4e8"><b>secure aggregation ON</b>: the server sees only masked weights</span>':'<span class=pill>secure aggregation off</span>')+
-   (s.sweep?'<span class=pill>sweep run '+(s.sweep.index+1)+' of '+s.sweep.total+'</span>':'')+'</p>';
- if(s.discarded_rounds&&s.discarded_rounds.length) h+='<p class=warn>Discarded rounds (a masked update cannot be used alone): '+
-   s.discarded_rounds.map(d=>'round '+d.round+' at '+new Date(d.time*1000).toLocaleTimeString()+' (received only '+(d.received.join(', ')||'nothing')+')').join('; ')+'</p>';
- if(!s.done) h+='<p>'+(s.pending.length?('Round '+s.version+': received '+s.pending.join(', ')+', waiting for '+waiting.join(', ')+
-   (s.round_wait_s!=null?' <span class=warn>('+s.round_wait_s+' s; timeout '+cfg.round_timeout_s+' s)</span>':'')):'Waiting for phones to send round '+s.version+' updates.')+'</p>';
- else h+='<p>Clients finished evaluating: '+(s.finished.join(', ')||'none yet')+'</p>';
- h+='<h2>Global model accuracy by round</h2>'+chart(s.history,exp);
- h+='<h2>Model comparison (computed on the phones)</h2>'+results(s.results)+recall(s.results);
- h+='<h2>What the phones upload (privacy evidence)</h2>'+uploads(s.uploads||{});
- h+='<h2>Clients</h2><table>'+row(['id','device','participant','train windows per pose (SU, SD, PU, PD, LL, LR)','last seen'],'th');
- for(const [c,v] of Object.entries(s.clients)){const age=v.seconds_since_seen;
-  h+=row([c,v.device||'',v.participant||'',(v.class_counts||[]).join(', ')||'-','<span class='+(age<10?'ok':'bad')+'>'+age+' s ago</span>']);}
- h+='</table><h2>Recent rounds</h2><table>'+row(['round','clients','missing','samples','train loss','val acc'],'th');
- for(const r of s.history.slice(-8).reverse()) h+=row([r.round,r.clients.join(', '),
-   (r.missing&&r.missing.length)?'<span class=warn>'+r.missing.join(', ')+'</span>':'-',
-   r.clients.map(c=>r['num_samples_'+c]).join(' / '),r.clients.map(c=>(r['train_loss_'+c]??'-')).join(' / '),
-   r.clients.map(c=>pct(r['val_acc_'+c])).join(' / ')]);
- h+='</table><h2>Traffic</h2><table>'+row(['client','requests','payload in','payload out','on the wire in','on the wire out'],'th');
- for(const [c,v] of Object.entries(s.traffic)) h+=row([c,v.requests,v.payload_in+' B',v.payload_out+' B',v.wire_in+' B',v.wire_out+' B']);
- h+='</table><p class=muted>Only model parameters, sample counts and metrics reach this server. Local-only models stored: '+(s.local_models.join(', ')||'none')+'.</p>';
- document.getElementById('s').innerHTML=h;
- if(!formShown){formShown=true;const d=document.createElement('div');
-  d.innerHTML='<h2>Start a new run</h2><form onsubmit="reset(event)">features <select name=fs>'+
-  ['acc','acc+grav','acc+grav+gyro','acc+grav+gyro+rot'].map(f=>'<option'+(f===cfg.feature_set?' selected':'')+'>'+f+'</option>').join('')+
-  '</select> rounds <input name=rounds type=number value='+cfg.rounds+' style="width:60px"> seed <input name=seed type=number value='+cfg.seed+
-  ' style="width:50px"> timeout (s) <input name=to type=number value='+cfg.round_timeout_s+' style="width:60px"> <label><input name=sec type=checkbox'+(s.secure?' checked':'')+'> secure aggregation</label><button>Start new run</button></form>';
-  document.body.appendChild(d);}
-}
-load();setInterval(load,1500);
-</script></body></html>"""
+DASHBOARD_FILE = os.path.join(HERE, "dashboard.html")   # the status page (plain HTML + JavaScript)
+
+
+def dashboard_page():
+    """The dashboard, read from dashboard.html on every request (so it can be edited without a restart)."""
+    try:
+        with open(DASHBOARD_FILE, "rb") as fh:
+            return fh.read()
+    except OSError:
+        return (b"<p>dashboard.html is missing: copy it next to fl_server.py. "
+                b"The server itself works; the data is at <a href=/status>/status</a>.</p>")
 
 
 class _CountingWriter:
@@ -707,7 +678,7 @@ def make_handler(state):
             except Exception as e:  # noqa: BLE001 - report instead of crashing the server
                 status, out = 500, {"error": f"{type(e).__name__}: {e}"}
             if url.path == "/" and status == 200:
-                n_out = self._send(200, STATUS_HTML.encode(), "text/html; charset=utf-8")
+                n_out = self._send(200, dashboard_page(), "text/html; charset=utf-8")
             else:
                 n_out = self._send(status, out)
             wire_in = len(self.requestline) + 2 + len(str(self.headers)) + len(raw)
@@ -732,6 +703,8 @@ def make_handler(state):
                     return state.get_uploads(query)
                 if path == "/pubkey":
                     return state.get_public_key(query)
+                if path == "/runs":
+                    return {"current": state.run_id, "runs": run_summary.summarize_runs(state.runs_dir)}
             else:
                 if path == "/register":
                     return state.register(body)
@@ -743,6 +716,8 @@ def make_handler(state):
                     return state.put_public_key(body)
                 if path == "/metrics":
                     return state.put_metrics(body)
+                if path == "/device_cost":
+                    return state.put_device_cost(body)
                 if path == "/done":
                     return state.done_client(body)
                 if path == "/admin/reset":
@@ -819,6 +794,8 @@ def main(argv=None):
                     help="seconds to wait for missing clients once a round has started (0 = wait forever)")
     ap.add_argument("--secure", dest="secure_aggregation", action="store_const", const=True,
                     help="secure aggregation: phones upload masked weights that only make sense once added together")
+    ap.add_argument("--compress", dest="compression", action="store_const", const=True,
+                    help="with --secure: send 8-bit changes under 16-bit masks (2 bytes per parameter)")
     ap.add_argument("--sweep", help="queue several runs: 'sensor_study', 'seeds', 'secure_study', or a JSON file with a list of overrides")
     ap.add_argument("--runs-dir", default=os.path.join(HERE, "runs"))
     ap.add_argument("--password", default=os.environ.get("POSEFL_PASSWORD", ""),
@@ -830,11 +807,15 @@ def main(argv=None):
     cfg = load_config(args.config, {"port": args.port, "rounds": args.rounds, "seed": args.seed,
                                     "feature_set": args.feature_set, "local_epochs": args.local_epochs,
                                     "round_timeout_s": args.round_timeout_s,
-                                    "secure_aggregation": args.secure_aggregation, "host": args.host})
+                                    "secure_aggregation": args.secure_aggregation, "compression": args.compression,
+                                    "host": args.host})
     sweep = load_sweep(args.sweep)
     for o in sweep or []:
         feature_size(o.get("feature_set", cfg["feature_set"]))
-    httpd, _ = make_server(cfg, args.runs_dir, sweep, args.password)
+    try:
+        httpd, _ = make_server(cfg, args.runs_dir, sweep, args.password)
+    except ValueError as e:
+        raise SystemExit(f"error: {e}")
     if args.public_url:
         url = args.public_url.rstrip("/")
     else:

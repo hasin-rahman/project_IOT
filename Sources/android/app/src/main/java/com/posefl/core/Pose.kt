@@ -53,3 +53,23 @@ enum class Pose(
         }
     }
 }
+
+/**
+ * The recording-time label check, used by the recording screen:
+ * the share of samples (first and last second left out) whose gravity direction matches [pose].
+ */
+object LabelCheck {
+    fun matchFraction(rows: List<DoubleArray>, pose: Pose): Double {
+        if (rows.isEmpty()) return 0.0
+        val t0 = rows.first()[0] + 1000
+        val t1 = rows.last()[0] - 1000
+        var n = 0
+        var ok = 0
+        for (r in rows) {
+            if (r[0] < t0 || r[0] > t1) continue
+            n++
+            if (Pose.guessFromGravity(r[4], r[5], r[6]) == pose) ok++
+        }
+        return if (n == 0) 0.0 else ok.toDouble() / n
+    }
+}

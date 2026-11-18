@@ -80,7 +80,7 @@ class PredictActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        title = "Live demo and test mode"
+        title = "Live demo and blind test"
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         prefs = AppPrefs(this)
         recorder = SensorRecorder(this)
@@ -91,8 +91,8 @@ class PredictActivity : Activity() {
         root.add(modelInfo)
 
         // ---- live: the three models on the same sensor window ----
-        val liveCard = vbox(padding = 12).apply { background = card(R.color.panel, 14) }
-        liveCard.add(label("LIVE · all three models, same 1-second window", 12f, bold = true, colorRes = R.color.muted))
+        val liveCard = whiteCard()
+        liveCard.add(sectionTitle("Live · all three models, same 1-second window"))
         for (name in ModelNames.ALL) {
             val line = label("${ModelNames.label(name)}: –", if (name == ModelNames.GLOBAL) 24f else 18f, bold = name == ModelNames.GLOBAL)
             liveViews[name] = line
@@ -103,7 +103,8 @@ class PredictActivity : Activity() {
         root.add(liveCard, dp(6))
 
         // ---- test mode selection ----
-        root.add(label("Test", 18f, bold = true), dp(16))
+        val testCard = whiteCard()
+        testCard.add(sectionTitle("Test"))
         val modes = RadioGroup(this)
         blindMode = RadioButton(this).apply { text = "Blind test: the judge chooses the pose (demo day)"; id = View.generateViewId() }
         val practiceMode = RadioButton(this).apply { text = "Practice: the app asks for a pose and keeps score"; id = View.generateViewId() }
@@ -111,34 +112,35 @@ class PredictActivity : Activity() {
         modes.addView(practiceMode)
         modes.check(blindMode.id)
         modes.setOnCheckedChangeListener { _, _ -> showModeChanged() }
-        root.add(modes)
+        testCard.add(modes)
         tester = EditText(this).apply { hint = "Tester name (practice)"; setText(prefs.participant); setSingleLine() }
-        root.add(tester, dp(2))
+        testCard.add(tester, dp(2))
 
         // ---- capture ----
         promptText = label("", 24f, bold = true).center()
         statusText = label("", 15f, colorRes = R.color.muted).center()
-        root.add(promptText, dp(8)).add(statusText)
-        captureButton = button("Capture placement") { startCapture() }.apply { textSize = 20f; minimumHeight = dp(72) }
-        root.add(captureButton, dp(6))
+        testCard.add(promptText, dp(8)).add(statusText)
+        captureButton = primaryButton("Capture placement") { startCapture() }.apply { textSize = 20f; minimumHeight = dp(72) }
+        testCard.add(captureButton, dp(6))
+        root.add(testCard, dp(12))
 
         // ---- the captured answer of each model (stays on screen until the next capture) ----
-        val resultCard = vbox(padding = 12).apply { background = card(R.color.panel, 14) }
-        resultTitle = label("No placement captured yet", 13f, bold = true, colorRes = R.color.muted)
+        val resultCard = whiteCard()
+        resultTitle = label("No placement captured yet", 13f, bold = true, colorRes = R.color.primary)
         resultCard.add(resultTitle)
         for (name in ModelNames.ALL) {
             val line = label("${ModelNames.label(name)}: –", 22f, bold = true)
             resultViews[name] = line
             resultCard.add(line, dp(4))
         }
-        root.add(resultCard, dp(8))
+        root.add(resultCard, dp(12))
 
         val row = hbox()
         row.add(button("Undo last") { undo() }, weight = 1f)
             .add(button("Finish / save") { finishTest() }, weight = 1f)
         root.add(row, dp(4))
         logText = label("", 13f, mono = true)
-        root.add(logText, dp(6))
+        root.add(logText, dp(8))
 
         setContentView(ScrollView(this).apply { addView(root) })
         showModeChanged()
@@ -268,9 +270,13 @@ class PredictActivity : Activity() {
         if (still || waitedTooLong) capture(frame, still)
     }
 
-    /** Records each model's answer for this ONE window, shows it and adds it to the log. */
+    /**
+     * Records each model's answer, shows it and adds it to the log. The answer is averaged over the
+     * last two 1-second windows (LivePredictor.captureAnswers); if there is not enough data for that,
+     * the newest window alone is used.
+     */
     private fun capture(frame: LiveFrame, still: Boolean) {
-        val answers = frame.windowAnswers()
+        val answers = predictor.captureAnswers(recorder.liveRows(), models).ifEmpty { frame.windowAnswers() }
         val pose = target
         val title: String
         if (pose == null) {

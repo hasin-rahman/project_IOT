@@ -11,8 +11,8 @@ android {
         applicationId = "com.posefl.app"
         minSdk = 26
         targetSdk = 34   // 34 keeps the classic layout below the status bar on Android 15+ (Galaxy S24)
-        versionCode = 5
-        versionName = "0.5-cloud"
+        versionCode = 7
+        versionName = "0.7"
     }
 
     buildTypes {

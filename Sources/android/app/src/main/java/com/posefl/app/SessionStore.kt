@@ -47,7 +47,7 @@ data class SessionMeta(
  * Raw recordings live in the app's private storage (filesDir/sessions). Other apps cannot read
  * them and they are never uploaded: the FL privacy rule says sensor data stays on the phone.
  */
-class SessionStore(context: Context) {
+class SessionStore(private val context: Context) {
     private val dir = File(context.filesDir, "sessions").apply { mkdirs() }
 
     fun save(meta: SessionMeta, rows: List<DoubleArray>) {

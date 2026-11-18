@@ -15,6 +15,10 @@ class HttpError(val code: Int, val error: String, val body: Map<String, Any?>) :
 interface Transport {
     /** Returns the parsed JSON object. Throws [HttpError] for 4xx/5xx and IOException if unreachable. */
     fun request(method: String, path: String, body: Map<String, Any?>? = null): Map<String, Any?>
+
+    /** JSON bytes sent and received so far (for the device-cost report; 0 if not counted). */
+    val bytesSent: Long get() = 0L
+    val bytesReceived: Long get() = 0L
 }
 
 /** [password]: the server password, if the server was started with one (sent as the X-Auth-Token header). */
@@ -25,6 +29,10 @@ class HttpTransport(
     private val readTimeoutMs: Int = 15_000,
 ) : Transport {
     val base = baseUrl.trim().trimEnd('/')
+    @Volatile override var bytesSent = 0L
+        private set
+    @Volatile override var bytesReceived = 0L
+        private set
 
     init {
         require(base.startsWith("http://") || base.startsWith("https://")) {
@@ -46,6 +54,7 @@ class HttpTransport(
                 conn.doOutput = true
                 conn.setFixedLengthStreamingMode(bytes.size)
                 conn.outputStream.use { it.write(bytes) }
+                bytesSent += bytes.size
             }
             val code = conn.responseCode
             if (code in 300..399) {
@@ -56,6 +65,7 @@ class HttpTransport(
             }
             val stream = if (code in 200..299) conn.inputStream else conn.errorStream
             val text = stream?.bufferedReader()?.use { it.readText() } ?: ""
+            bytesReceived += text.toByteArray(Charsets.UTF_8).size
             val json = if (text.isNotBlank()) Json.parseObject(text) else emptyMap()
             if (code !in 200..299) throw HttpError(code, json.str("error", "HTTP $code"), json)
             return json
@@ -139,6 +149,8 @@ class LocalData(
     /** Test sessions from people who recorded no training data on this phone (unseen users). */
     val testUnseen: Dataset,
     val trainParticipants: Set<String>,
+    /** How long building the features took on this phone, per 1-second window (device-cost report). */
+    val featureMsPerWindow: Double = 0.0,
 ) {
     /** Named test sets that have data, in report order. */
     fun testSets(): List<Pair<String, Dataset>> =
@@ -150,6 +162,7 @@ class LocalData(
          * Validation and test sessions may contain all six poses and are never used for training.
          */
         fun build(sessions: List<LabeledSession>, clientId: String, featureSet: String, cfg: WindowConfig = WindowConfig()): LocalData {
+            val startNs = System.nanoTime()
             val trainPoses = Pose.trainPosesFor(clientId).toSet()
             val trainSessions = sessions.filter { it.split == "train" && it.pose in trainPoses }
             val trainPeople = trainSessions.map { it.participant }.toSet()
@@ -166,13 +179,16 @@ class LocalData(
             }
 
             val tests = sessions.filter { it.split == "test" }
+            val train = ds(trainSessions)
+            val validation = ds(sessions.filter { it.split == "val" })
+            val test = ds(tests)
+            val windows = train.size + validation.size + test.size
+            val ms = (System.nanoTime() - startNs) / 1e6
             return LocalData(
-                featureSet,
-                ds(trainSessions),
-                ds(sessions.filter { it.split == "val" }),
-                ds(tests),
+                featureSet, train, validation, test,
                 ds(tests.filter { it.participant !in trainPeople }),
                 trainPeople,
+                featureMsPerWindow = if (windows == 0) 0.0 else ms / windows,
             )
         }
     }
@@ -200,6 +216,8 @@ interface FlListener {
     fun results(runId: String, featureSet: String, rows: List<EvalRow>)
     /** Called with the exact JSON text of every upload, so the app can show what leaves the phone. */
     fun uploaded(endpoint: String, json: String) {}
+    /** What the finished run cost on this phone (time, data, battery). */
+    fun deviceCost(runId: String, cost: DeviceCost) {}
 }
 
 /** The training settings the server hands out, so both phones train the same way. */
@@ -214,6 +232,8 @@ class TrainConfig(json: Map<String, Any?>) {
     val seed = json.int("seed", 0)
     /** Extra credit: upload masked weights that only make sense once the server adds both phones' uploads. */
     val secure = json.bool("secure_aggregation")
+    /** Extra credit, with [secure]: send 8-bit changes under 16-bit masks instead of masked full weights. */
+    val compression = json.bool("compression")
 }
 
 /** The server's answer to GET /global: where the run is, the current global model and the settings. */
@@ -229,6 +249,10 @@ class ServerState(json: Map<String, Any?>) {
     val attempt = json.int("attempt")
     /** Secure aggregation: changes whenever a phone publishes a new public key. */
     val keyEpoch = json.int("key_epoch")
+    /** Compression: the scale of this round (largest change allowed per parameter). */
+    val clip = json.dbl("clip")
+    /** Compression: all phones' training windows together (0 until every phone has reported its count). */
+    val totalSamples = json.int("total_samples")
     val globalModel: SoftmaxModel by lazy { ModelIo.fromMap(json.obj("model")) }
     val config = TrainConfig(json.obj("train_config"))
 }
@@ -258,8 +282,11 @@ class FlRunner(
     private val store: ModelStore?,
     private val listener: FlListener,
     private val sleeper: (Long) -> Unit = { Thread.sleep(it) },
+    /** Reads the phone's battery for the device-cost report (null when not available, e.g. in tests). */
+    battery: () -> BatteryReading? = { null },
 ) {
     @Volatile var stopRequested = false
+    private val cost = CostTracker(transport, battery)
     private val otherId = if (clientId == "A") "B" else "A"
 
     // ---- what this phone remembers about the run it is taking part in ----
@@ -347,6 +374,7 @@ class FlRunner(
         val cfg = server.config
         listener.log("Run ${server.runId}: feature set ${cfg.featureSet}, ${cfg.rounds} rounds, ${cfg.localEpochs} local epoch(s), seed ${cfg.seed}")
         listener.progress(server.runId, server.version, cfg.rounds, "baseline", null)
+        cost.start()
 
         val d = dataFor(cfg.featureSet)
         if (d.train.isEmpty()) {
@@ -363,7 +391,8 @@ class FlRunner(
         if (cfg.secure) {
             // publish a fresh public key; the local model is uploaded later, encrypted (see agreeOnKeys)
             val session = SecureSession(clientId, otherId, server.runId)
-            upload("/pubkey", linkedMapOf("client_id" to clientId, "run_id" to server.runId, "public_key" to session.publicKey))
+            upload("/pubkey", linkedMapOf("client_id" to clientId, "run_id" to server.runId,
+                "public_key" to session.publicKey, "num_samples" to d.train.size))
             secure = session
             listener.log("Secure aggregation is ON for this run: weights are masked before upload.")
         } else {
@@ -399,9 +428,10 @@ class FlRunner(
         listener.log("Agreed on a shared key with client $otherId. The server only relayed public keys and cannot compute it.")
         val d = data!!
         val localJson = Json.stringify(ModelIo.toMap(localModel!!, server.config.featureSet))
+        // no class_counts here: with secure aggregation they would tell the server which poses this phone has
         upload("/local_model", linkedMapOf(
             "client_id" to clientId, "encrypted_model" to session.encryptLocalModel(localJson),
-            "num_samples" to d.train.size, "class_counts" to d.train.classCounts()))
+            "num_samples" to d.train.size))
         return true
     }
 
@@ -418,9 +448,11 @@ class FlRunner(
      */
     private fun trainLocalOnlyModel(d: LocalData, cfg: TrainConfig): SoftmaxModel {
         val model = SoftmaxModel(FeatureSets.size(cfg.featureSet))
-        val t0 = System.currentTimeMillis()
+        val t0 = System.nanoTime()
         model.train(d.train.X, d.train.y, epochs = cfg.baselineEpochs, lr = cfg.lr, batchSize = cfg.batchSize, l2 = cfg.l2, rng = rng)
-        listener.log("Trained local-only model ($clientId) from scratch in ${System.currentTimeMillis() - t0} ms; uploading it so the other phone can compare.")
+        val ms = Math.round((System.nanoTime() - t0) / 1e5) / 10.0
+        cost.baselineTrained(ms)
+        listener.log("Trained local-only model ($clientId) from scratch in $ms ms; uploading it so the other phone can compare.")
         return model
     }
 
@@ -429,6 +461,10 @@ class FlRunner(
     /** Download the global model, train a copy on this phone's data, upload the new weights. */
     private fun federatedRound(server: ServerState) {
         val cfg = server.config
+        if (secure != null && cfg.compression && server.totalSamples <= 0) {
+            waitForOtherKey(server)   // compression needs both phones' sample counts first
+            return
+        }
         val d = data!!
         val round = server.version
         waitingLogged = false
@@ -440,29 +476,43 @@ class FlRunner(
 
         // b) local training: start from the global model, train on this phone's data only
         val model = global.copy()
-        val t0 = System.currentTimeMillis()
+        val t0 = System.nanoTime()
         model.train(d.train.X, d.train.y, epochs = cfg.localEpochs, lr = cfg.lr, batchSize = cfg.batchSize, l2 = cfg.l2, rng = rng)
-        val trainMs = System.currentTimeMillis() - t0
+        val trainMs = round5((System.nanoTime() - t0) / 1e6)
         val fit = model.evaluate(d.train.X, d.train.y)
 
         // c) upload: the weights plus metadata. No sensor readings and no feature vectors.
         val update = linkedMapOf<String, Any?>(
             "client_id" to clientId, "run_id" to server.runId, "base_version" to round,
-            "num_samples" to d.train.size, "class_counts" to d.train.classCounts(),
+            "num_samples" to d.train.size,
             "train_loss" to round5(fit.loss), "train_acc" to round5(fit.accuracy),
             "train_ms" to trainMs, "val_acc" to valAcc?.let { round5(it) },
         )
         val session = secure
+        // the per-pose counts are only sent in plain mode: with secure aggregation they would give away
+        // which poses this phone has (the "curious server" attack, server/curious_server.py)
+        if (session == null) update["class_counts"] = d.train.classCounts()
         val seenByServer: SoftmaxModel
         if (session == null) {
             update["model"] = ModelIo.toMap(model, cfg.featureSet)
             seenByServer = model
+        } else if (cfg.compression) {
+            // compressed secure aggregation: the change of the weights, weighted, 8-bit, under 16-bit masks
+            noteRestartedRound(round, server.attempt)
+            val change = (model.W + model.b).zip(global.W + global.b) { new, old -> new - old }.toDoubleArray()
+            val weight = d.train.size.toDouble() / server.totalSamples
+            val packed = session.maskCompressed(change, weight, server.clip, round, server.attempt)
+            update["masked_delta"] = linkedMapOf("n_params" to change.size, "payload" to packed.payload)
+            update["max_abs_delta"] = round5(change.maxOf { kotlin.math.abs(it) })
+            update["clipped"] = packed.clipped
+            update["attempt"] = server.attempt
+            update["key_epoch"] = session.keyEpoch
+            if (packed.clipped > 0) listener.log("Round $round: ${packed.clipped} values were larger than the scale ${server.clip} and were clipped.")
+            // privacy check: what this one upload reveals on its own (as in the uncompressed mode, it is noise)
+            seenByServer = modelFromNumbers(SecureAggregation.decodeCompressedAlone(packed.payload, weight, server.clip), model)
         } else {
             // secure aggregation: upload the masked numbers instead of the real weights
-            if (server.attempt != lastAttempt && server.attempt > 0) {
-                listener.log("Round $round: the server restarted this round (a masked update cannot be used on its own). Sending again with a new mask.")
-            }
-            lastAttempt = server.attempt
+            noteRestartedRound(round, server.attempt)
             val masked = session.mask(model, d.train.size, round, server.attempt)
             update["masked_model"] = linkedMapOf(
                 "n_features" to model.nFeatures, "n_classes" to model.nClasses,
@@ -473,9 +523,11 @@ class FlRunner(
         }
         try {
             val reply = upload("/update", update)
+            cost.addRound(trainMs)
             lastValAcc = valAcc
             lastUploadAsSeenByServer = seenByServer
-            listener.log("Round $round: sent ${model.numParams} " + (if (session == null) "weights" else "MASKED weights") +
+            listener.log("Round $round: sent ${model.numParams} " +
+                (if (session == null) "weights" else if (cfg.compression) "COMPRESSED MASKED changes" else "MASKED weights") +
                 (valAcc?.let { String.format(java.util.Locale.US, " (global v$round val acc %.1f%%)", it * 100) } ?: "") +
                 if (reply.bool("aggregated")) " -> server averaged v${reply.int("version")}" else "")
         } catch (e: HttpError) {
@@ -483,6 +535,14 @@ class FlRunner(
             if (e.code == 409) listener.log("Round $round: server already moved on (${e.error}); downloading the newest model.")
             else throw e
         }
+    }
+
+    /** Secure aggregation: tell the user when the server threw a round away and it is being repeated. */
+    private fun noteRestartedRound(round: Int, attempt: Int) {
+        if (attempt != lastAttempt && attempt > 0) {
+            listener.log("Round $round: the server restarted this round (a masked update cannot be used on its own). Sending again with a new mask.")
+        }
+        lastAttempt = attempt
     }
 
     private fun waitForOtherPhone(server: ServerState) {
@@ -527,6 +587,13 @@ class FlRunner(
             })
         }
         if (rows.isEmpty()) listener.log("No validation or test sessions recorded on this phone, so nothing to evaluate.")
+
+        // what the run cost on this phone (time, data, battery); sent before /done so the server has it
+        val windows = d.testSets().flatMap { it.second.X }.take(200)
+        val predictMs = CostTracker.timePredictions(listOfNotNull(global, models["local_A"], models["local_B"]), windows)
+        val runCost = cost.finish(d.featureMsPerWindow, predictMs)
+        upload("/device_cost", runCost.toMap(clientId, runId))
+        listener.deviceCost(runId, runCost)
 
         upload("/done", mapOf("client_id" to clientId, "run_id" to runId))
         listener.results(runId, spec, rows)

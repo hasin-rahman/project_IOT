@@ -146,3 +146,79 @@ def decrypt(key, label, blob):
         return None
     stream = b"".join(w.to_bytes(8, "big") for w in random_words(key, "enc|" + label, (len(ciphertext) + 7) // 8))
     return bytes(a ^ b for a, b in zip(ciphertext, stream)).decode()
+
+
+# ------------------------------------------------------------------ compressed secure aggregation
+# Shiv's 8-bit compression combined with the masking above (extra credit, README §12).
+#
+# Instead of the full weights, each phone sends the CHANGE it made this round (delta = new - global),
+# already multiplied by its share of the training data (weight = n_i / total), clipped to +-clip and
+# rounded to one of 255 levels (8-bit precision). The server announces `clip` each round, so both
+# phones use the same scale. Because the two weighted values add up to at most +-127 levels, a 16-bit
+# mask is enough (instead of 64 bits): each parameter costs 2 bytes. The server adds the uploads
+# (modulo 2^16), the masks cancel, and  sum * clip / 127  is exactly the FedAvg change, up to rounding.
+
+LEVELS = 127
+MOD16 = 1 << 16
+
+
+def compressed_label(run_id, round_number, attempt):
+    """Its own label, so the 16-bit masks never repeat the 64-bit ones."""
+    return f"cmask|{run_id}|{round_number}|{attempt}"
+
+
+def quantize(delta, weight, clip):
+    """weight * delta, clipped to +-clip, as whole numbers between -127 and 127. Also returns how many values were clipped."""
+    out, clipped = [], 0
+    for d in delta:
+        if abs(d) > clip:
+            clipped += 1
+            d = clip if d > 0 else -clip
+        out.append(int(round(weight * d / clip * LEVELS)))
+    return out, clipped
+
+
+def mask_compressed(delta, weight, clip, key, label, adds_mask):
+    """The phone side: quantize, add (or subtract) a 16-bit mask, pack as base64 (2 bytes per parameter)."""
+    import base64
+    import struct
+    q, clipped = quantize(delta, weight, clip)
+    masks = [w & 0xFFFF for w in random_words(key, label, len(q))]
+    packed = [((v + m) if adds_mask else (v - m)) % MOD16 for v, m in zip(q, masks)]
+    return base64.b64encode(struct.pack(f"<{len(packed)}H", *packed)).decode(), clipped
+
+
+def _unpack16(payload, n_params):
+    import base64
+    import struct
+    raw = base64.b64decode(payload, validate=True)
+    if len(raw) != 2 * n_params:
+        raise ValueError(f"expected {n_params} compressed values")
+    return struct.unpack(f"<{n_params}H", raw)
+
+
+def validate_compressed(payload, n_params):
+    if not isinstance(payload, str):
+        raise ValueError("payload must be a base64 string")
+    _unpack16(payload, n_params)
+
+
+def sum_compressed(payloads, n_params, clip):
+    """The server side: add the masked uploads modulo 2^16; the masks cancel and the FedAvg change is left."""
+    columns = [_unpack16(p, n_params) for p in payloads]
+    out = []
+    for i in range(n_params):
+        s = sum(c[i] for c in columns) % MOD16
+        if s >= MOD16 // 2:
+            s -= MOD16
+        out.append(s * clip / LEVELS)
+    return out
+
+
+def decode_compressed_alone(payload, n_params, weight, clip):
+    """What ONE compressed masked upload looks like if someone reads it as a change of the weights (noise)."""
+    out = []
+    for v in _unpack16(payload, n_params):
+        s = v - MOD16 if v >= MOD16 // 2 else v
+        out.append(s * clip / LEVELS / weight)
+    return out

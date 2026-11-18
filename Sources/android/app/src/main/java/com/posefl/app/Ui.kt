@@ -37,10 +37,27 @@ internal fun Activity.button(text: String, onClick: () -> Unit): Button = Button
     setOnClickListener { onClick() }
 }
 
-internal fun Activity.card(colorRes: Int, radiusDp: Int = 12): GradientDrawable = GradientDrawable().apply {
+/** A rounded white panel (same look as res/drawable/card.xml) that groups related things on a screen. */
+internal fun Activity.whiteCard(padding: Int = 14): LinearLayout =
+    vbox(padding).apply { background = cardBackground(R.color.card) }
+
+/** Rounded corners, thin grey border, filled with [colorRes]. */
+internal fun Activity.cardBackground(colorRes: Int): GradientDrawable = GradientDrawable().apply {
     setColor(getColor(colorRes))
-    cornerRadius = dp(radiusDp).toFloat()
+    cornerRadius = dp(12).toFloat()
+    setStroke(dp(1), getColor(R.color.card_line))
 }
+
+/** A small blue title at the top of a card, e.g. "RESULTS". */
+internal fun Activity.sectionTitle(text: String): TextView =
+    label(text.uppercase(java.util.Locale.US), 13f, bold = true, colorRes = R.color.primary).apply { letterSpacing = 0.05f }
+
+/** The main button of a screen: filled with the app colour (style Button.Primary in themes.xml). */
+internal fun Activity.primaryButton(text: String, onClick: () -> Unit): Button =
+    Button(this, null, 0, R.style.Button_Primary).apply {
+        this.text = text
+        setOnClickListener { onClick() }
+    }
 
 /** Adds [child] to this LinearLayout, full width, with a top margin. */
 internal fun LinearLayout.add(child: View, topMarginPx: Int = 0, weight: Float = 0f): LinearLayout {

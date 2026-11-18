@@ -1,0 +1,280 @@
+<!doctype html>
+<html><head><meta charset=utf-8><title>Phone-pose FL · dashboard</title>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<!--
+  The server's dashboard: one page, no libraries. Every 1.5 s it asks the server for GET /status
+  (the current run) and every 5 s for GET /runs (one summary per run), and redraws.
+  Sections: 1 Training · 2 Three models compared · 3 Privacy · 4 Cost on the phones · 5 Compare runs · 6 Phones
+-->
+<style>
+:root{--blue:#1F5FA8;--A:#2a78d6;--B:#eb6834;--ok:#1e8e3e;--warn:#b26a00;--bad:#c62828;--muted:#5f6368;
+ --line:#e3e6ea;--panel:#f5f7fa;--card:#fff}
+*{box-sizing:border-box}
+body{font:15px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;background:var(--panel);color:#202124}
+header{background:var(--blue);color:#fff;padding:14px 24px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}
+header h1{font-size:20px;margin:0;font-weight:600}header .sub{opacity:.85;font-size:13px}
+header button{margin-left:auto;background:rgba(255,255,255,.15);color:#fff;border:1px solid rgba(255,255,255,.4);
+ border-radius:6px;padding:6px 12px;cursor:pointer;font:inherit;font-size:13px}
+main{max-width:1180px;margin:0 auto;padding:16px 20px 40px}
+.strip{display:flex;gap:8px;flex-wrap:wrap;margin:4px 0 14px}
+.pill{display:inline-block;padding:3px 10px;border-radius:12px;background:#e8eef6;font-size:13px}
+.pill.on{background:#e3f4e8;color:#14612b;font-weight:600}.pill.off{background:#eee}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;margin-bottom:8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
+.card .k{font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.04em}
+.card .v{font-size:28px;font-weight:650;margin:2px 0;white-space:nowrap}.card .v.mid{font-size:24px}.card .s{font-size:13px;color:var(--muted)}
+.bar{height:6px;background:#e6e9ee;border-radius:3px;overflow:hidden;margin-top:6px}.bar i{display:block;height:100%;background:var(--blue)}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px;margin-top:14px}
+section h2{font-size:17px;margin:0 0 2px}section h2 small{font-weight:400;color:var(--muted);font-size:13px;margin-left:6px}
+.lead{color:var(--muted);margin:2px 0 10px;font-size:14px}
+table{border-collapse:collapse;margin:6px 0 10px;font-size:14px}
+td,th{padding:5px 10px;text-align:left;border-bottom:1px solid var(--line);vertical-align:top}
+th{color:var(--muted);font-weight:500;font-size:13px}tr.now td{background:#f0f6ff}
+.num{text-align:right;font-variant-numeric:tabular-nums}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.bad{color:var(--bad)}.muted{color:var(--muted)}
+.cols{display:grid;grid-template-columns:repeat(auto-fit,minmax(420px,1fr));gap:16px}
+.box{background:var(--panel);border-radius:8px;padding:10px 14px}
+details summary{cursor:pointer;color:var(--blue);font-size:13px}
+pre{max-height:260px;overflow:auto;background:#f6f8fb;padding:8px;border-radius:6px;font-size:12px;max-width:620px;white-space:pre-wrap;word-break:break-all}
+form{display:flex;gap:10px;flex-wrap:wrap;align-items:center;background:var(--panel);padding:10px 12px;border-radius:8px}
+input[type=number]{width:64px}button.go{background:var(--blue);color:#fff;border:0;border-radius:6px;padding:6px 14px;cursor:pointer}
+svg text{font-size:12px;fill:var(--muted)}
+.msg{padding:10px 14px;border-radius:8px;background:#fff4e5;color:var(--warn);margin:8px 0}
+/* presentation view: bigger text, detail tables hidden */
+body.present{font-size:17px}body.present .detail{display:none}body.present .card .v{font-size:32px}body.present .card .v.mid{font-size:26px}
+</style></head>
+<body>
+<header><div><h1>Phone-pose federated learning</h1><div class=sub>CSC 8223 · two phones learn six poses together; raw sensor data never leaves the phones</div></div>
+<button id=pv onclick="togglePresent()">Presentation view</button></header>
+<main><div id=app class=muted>Loading…</div><div id=form></div></main>
+<script>
+// ------------------------------------------------------------------ small helpers
+const POSES=['Screen Up','Screen Down','Portrait Up','Portrait Down','Landscape Left','Landscape Right'];
+const MODEL_NAMES={global:'Federated global',local_A:'Client A local',local_B:'Client B local',server_sees:'One upload, read by the server'};
+const COLOR={A:'#2a78d6',B:'#eb6834'};
+const pct=v=>typeof v==='number'?(100*v).toFixed(1)+'%':'–';
+const kb=v=>typeof v==='number'?(v>=1000?(v/1000).toFixed(1)+' KB':Math.round(v)+' B'):'–';
+const num=(v,d=1)=>typeof v==='number'?v.toFixed(d):'–';
+const esc=t=>String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;');
+const row=(cells,tag='td')=>'<tr>'+cells.map(c=>'<'+tag+'>'+c+'</'+tag+'>').join('')+'</tr>';
+const card=(k,v,s,cls='')=>'<div class=card><div class=k>'+k+'</div><div class="v '+cls+'">'+v+'</div><div class=s>'+s+'</div></div>';
+const modeLabel=s=>s.compressed?'Secure + compressed':s.secure?'Secure aggregation':'Plain FedAvg';
+// Is what the server learned from one upload close to guessing? Guessing = 16.7% accuracy, or 3 of 6 poses.
+const privateAcc=v=>v<0.3, privateScore=v=>v<=4;
+
+// The server password: asked once, remembered in this browser, sent with every request.
+let TOKEN='';try{TOKEN=localStorage.getItem('posefl_token')||''}catch(e){}
+function api(path,opt={}){opt.headers=Object.assign({'X-Auth-Token':TOKEN},opt.headers||{});return fetch(path,opt)}
+function askPassword(){const t=prompt('This server needs a password:');if(t!==null){TOKEN=t;try{localStorage.setItem('posefl_token',t)}catch(e){}}load()}
+function togglePresent(){document.body.classList.toggle('present');try{localStorage.setItem('posefl_present',document.body.classList.contains('present')?'1':'')}catch(e){}}
+try{if(localStorage.getItem('posefl_present'))document.body.classList.add('present')}catch(e){}
+
+// the latest result of one model on one phone ('test' recordings if there are any, else 'val')
+function result(rs,cid,model){for(const set of ['test','val']){const r=rs.find(r=>r.client_id===cid&&r.model_name===model&&r.test_set===set);if(r)return r}return null}
+function avgAcc(rs,model){const v=['A','B'].map(c=>result(rs,c,model)).filter(Boolean).map(r=>r.metrics.accuracy);return v.length?v.reduce((a,b)=>a+b)/v.length:null}
+
+// ------------------------------------------------------------------ headline cards
+function headline(s,run){
+ const done=s.done, waiting=s.config.expected_clients.filter(c=>!s.pending.includes(c));
+ const training=card('Training',done?'<span class=ok>Done ✓</span>':'Round '+s.version+' / '+s.rounds,
+   (done?s.rounds+' rounds of federated averaging':s.pending.length?'waiting for '+waiting.join(', '):'waiting for the phones')+
+   '<div class=bar><i style="width:'+(100*Math.min(1,s.version/s.rounds))+'%"></i></div>');
+ const g=avgAcc(s.results,'global'), a=avgAcc(s.results,'local_A'), b=avgAcc(s.results,'local_B');
+ const global=card('Federated global model',pct(g),g==null?'measured on the phones when training is done':'accuracy on both phones’ test recordings, all 6 poses',g!=null&&g>=.9?'ok':'');
+ const p0=v=>typeof v==='number'?Math.round(100*v)+'%':'–';
+ const locals=card('Local-only models','A '+p0(a)+' · B '+p0(b),'each phone trained alone on 3 of the 6 poses','mid');
+ const cs=run&&run.curious_score;
+ const curious=card('Curious server',cs==null?'–':num(cs,1)+' / 6',
+   cs==null?'guess of each phone’s poses, from one upload':privateScore(cs)?'poses guessed from one upload: <b class=ok>about chance (3 / 6)</b>':'poses guessed from one upload: <b class=bad>it can tell</b>',
+   cs==null?'':privateScore(cs)?'ok':'bad');
+ const up=run&&run.upload_bytes;
+ const size=card('Upload per round',kb(up),s.compressed?'masked 8-bit changes, 2 bytes per parameter':s.secure?'masked weights':s.n_params+' weights + sample count');
+ return '<div class=cards>'+training+global+locals+curious+size+'</div>';
+}
+
+// ------------------------------------------------------------------ 1. training progress
+function chart(hist,clients){
+ const W=640,H=220,L=40,R=14,T=12,B=38,n=hist.length;
+ if(!n) return '<p class=muted>No rounds yet. Each phone measures the current global model on its own validation recordings before it trains.</p>';
+ const x=i=>L+(n<2?0:(W-L-R)*i/(n-1)), y=v=>T+(H-T-B)*(1-v);
+ let g='<svg width='+W+' height='+H+' role=img>';
+ for(const v of [0,.25,.5,.75,1]) g+='<line x1='+L+' x2='+(W-R)+' y1='+y(v)+' y2='+y(v)+' stroke=#e6e9ee /><text x=4 y='+(y(v)+4)+'>'+(v*100)+'%</text>';
+ for(const i of [...new Set([0,Math.round((n-1)/2),n-1])]) g+='<text x='+(x(i)-4)+' y='+(H-B+16)+'>'+hist[i].round+'</text>';
+ g+='<text x='+(W/2-60)+' y='+(H-4)+'>round (global model version)</text>';
+ let legend='';
+ clients.forEach((c,ci)=>{
+  const pts=hist.map((r,i)=>[i,r['val_acc_'+c]]).filter(p=>typeof p[1]==='number'); if(!pts.length) return;
+  const dash=ci?' stroke-dasharray="6 4"':'';
+  g+='<polyline fill=none stroke-width=2.5 stroke='+COLOR[c]+dash+' points="'+pts.map(p=>x(p[0])+','+y(p[1])).join(' ')+'"/>';
+  legend+='<span class=pill><svg width=22 height=10><line x1=0 x2=22 y1=5 y2=5 stroke-width=2.5 stroke='+COLOR[c]+dash+' /></svg> phone '+c+': <b>'+pct(pts[pts.length-1][1])+'</b></span> ';
+ });
+ return '<div>'+legend+'</div>'+g+'</svg>';
+}
+function training(s){
+ const cfg=s.config, waiting=cfg.expected_clients.filter(c=>!s.pending.includes(c));
+ let h='<section><h2>1 · Training <small>FedAvg rounds: download the global model → train on local data → upload → average</small></h2>';
+ if(!s.done) h+='<p class=lead>'+(s.pending.length?'Round '+s.version+': received '+s.pending.join(', ')+', waiting for '+waiting.join(', ')+
+   (s.round_wait_s!=null&&cfg.round_timeout_s?' <span class=warn>('+s.round_wait_s+' s of '+cfg.round_timeout_s+' s timeout)</span>':''):'Waiting for the phones to send round '+s.version+'.')+'</p>';
+ else h+='<p class=lead>All '+s.rounds+' rounds done. Phones finished evaluating: '+(s.finished.join(', ')||'none yet')+'.</p>';
+ if(s.discarded_rounds&&s.discarded_rounds.length) h+='<div class=msg>Dropout: '+s.discarded_rounds.length+' round(s) discarded and repeated (one masked upload alone cannot be unmasked). Last: round '+
+   s.discarded_rounds[s.discarded_rounds.length-1].round+', received only '+(s.discarded_rounds[s.discarded_rounds.length-1].received.join(', ')||'nothing')+'.</div>';
+ h+='<p class=muted style="margin:4px 0">Global model accuracy on each phone’s validation recordings, measured before each round.</p>'+chart(s.history,cfg.expected_clients);
+ h+='<details class=detail><summary>Recent rounds</summary><table>'+row(['round','phones','missing','windows','train loss','val acc','time'],'th');
+ for(const r of s.history.slice(-10).reverse()) h+=row([r.round,r.clients.join(', '),r.missing&&r.missing.length?'<span class=warn>'+r.missing.join(', ')+'</span>':'–',
+   r.clients.map(c=>r['num_samples_'+c]).join(' / '),r.clients.map(c=>r['train_loss_'+c]??'–').join(' / '),r.clients.map(c=>pct(r['val_acc_'+c])).join(' / '),num(r.duration_s,2)+' s']);
+ return h+'</table></details></section>';
+}
+
+// ------------------------------------------------------------------ 2. the three models
+function models(rs){
+ let h='<section><h2>2 · Three models compared <small>scored on the phones, on the same recordings</small></h2>';
+ if(!rs.length) return h+'<p class=lead>No results yet: the phones report them after the last round.</p></section>';
+ h+='<p class=lead>Each local model only ever saw its own phone’s 3 poses, so it gets the other 3 wrong. The federated model learned all 6, although neither phone shared its data.</p>';
+ const sets=[...new Set(rs.map(r=>r.client_id+' / '+r.test_set))].sort();
+ h+='<table>'+row(['model'].concat(sets.map(s=>'phone '+s.replace(' / ',' · '))),'th');
+ for(const m of ['global','local_A','local_B','server_sees']){
+  if(!rs.some(r=>r.model_name===m)) continue;
+  h+=row(['<b>'+MODEL_NAMES[m]+'</b>'].concat(sets.map(s=>{const r=rs.find(r=>r.client_id+' / '+r.test_set===s&&r.model_name===m);
+   return r?'<span class=num>'+pct(r.metrics.accuracy)+'</span> <span class=muted>F1 '+num(r.metrics.macro_f1??0,2)+' · n='+(r.metrics.n??'?')+'</span>':'–'})));
+ }
+ h+='</table><div class=cols>';
+ for(const c of [...new Set(rs.map(r=>r.client_id))].sort()){
+  const set=['test','val','live_test'].find(t=>rs.some(r=>r.client_id===c&&r.test_set===t)); if(!set) continue;
+  h+='<div><b>Recall per pose on phone '+c+'</b> <span class=muted>('+set+'; poses 1–3 are A’s, 4–6 are B’s)</span><table>'+row(['model'].concat(POSES.map((p,i)=>(i+1)+'')),'th');
+  for(const m of ['global','local_A','local_B','server_sees']){
+   const r=rs.find(r=>r.client_id===c&&r.test_set===set&&r.model_name===m); if(!r||!r.metrics.per_class_recall) continue;
+   h+=row([MODEL_NAMES[m]].concat(r.metrics.per_class_recall.map(v=>'<span class='+(v>=.9?'ok':v<=.1?'bad':'warn')+'>'+Math.round(100*v)+'%</span>')));
+  }
+  h+='</table></div>';
+ }
+ return h+'</div><p class=muted style="font-size:13px">Poses: '+POSES.map((p,i)=>(i+1)+' '+p).join(' · ')+'</p></section>';
+}
+
+// ------------------------------------------------------------------ 3. privacy
+const openIds=new Set();
+function tog(d){if(d.open)openIds.add(d.id);else openIds.delete(d.id)}
+function uploads(up){
+ const cs=Object.keys(up).filter(c=>c!=='-').sort();
+ if(!cs.length) return '<p class=muted>Nothing uploaded yet.</p>';
+ let h='';
+ for(const c of cs){
+  h+='<table>'+row(['phone '+c,'size','what it contains'],'th');
+  // the model uploads first; the small bookkeeping uploads are folded away
+  const line=ep=>{const u=up[c][ep]; if(!u) return ''; const id='u_'+c+ep.replace('/','_');
+   return row(['<b>POST '+ep+'</b><br><span class=muted>'+new Date(u.time*1000).toLocaleTimeString()+'</span>','<span class=num>'+u.bytes+'&nbsp;B</span>',
+    esc(u.summary)+'<details class=detail id='+id+(openIds.has(id)?' open':'')+' ontoggle="tog(this)"><summary>raw JSON, exactly as it arrived</summary><pre>'+esc(JSON.stringify(u.body,null,1))+'</pre></details>'])};
+  h+=['/update','/local_model','/pubkey'].map(line).join('')+'</table>';
+  const rest=['/metrics','/device_cost','/register','/done'].map(line).join('');
+  if(rest){const id='more_'+c; h+='<details class=detail id='+id+(openIds.has(id)?' open':'')+' ontoggle="tog(this)"><summary>other uploads from phone '+c+' (scores, cost, sign-in)</summary><table>'+rest+'</table></details>'}
+ }
+ return h;
+}
+function curious(run,s){
+ let h='<div class=box><b>Curious-server attack</b> <span class=muted>(curious_server.py)</span>'+
+  '<p class=muted style="margin:4px 0;font-size:13px">The server compares each phone’s upload with the model it sent: poses whose bias went <i>up</i> are poses the phone trained on. Random guessing gets 3 of 6 right.</p>';
+ if(!run||run.curious_score==null) return h+'<p class=muted>No updates to attack yet.</p></div>';
+ h+='<table>'+row(['phone','really has','server’s last guess','right per upload'],'th');
+ for(const c of ['A','B']){const k=run.curious&&run.curious[c]; if(!k) continue;
+  h+=row([c,k.truth.join(', '),(k.last_guess||[]).join(', ')||'none','<b class='+(privateScore(k.average_score)?'ok':'bad')+'>'+num(k.average_score,1)+' / 6</b>']);}
+ h+='</table><p style="margin:4px 0">Per-pose counts in the uploads: '+(run.label_counts_visible?
+  '<b class=bad>visible</b> <span class=muted>(plain mode sends them; they give the answer away directly)</span>':
+  '<b class=ok>hidden</b> <span class=muted>(secure mode sends only the total; the server refuses class_counts)</span>')+'</p></div>';
+ return h;
+}
+function privacy(s,run){
+ return '<section><h2>3 · Privacy <small>what reaches the server, and what it could learn from it</small></h2>'+
+  '<p class=lead>The server accepts only the fields on its allow-list (fl_server.py, ALLOWED_UPLOAD_FIELDS): model weights, sample counts and scores. '+
+  'Sensor readings and feature vectors have no field, so they cannot be uploaded. '+(s.secure?'<b class=ok>Secure aggregation is on:</b> the weights arrive masked.':'Secure aggregation is off: the weights arrive as they are.')+'</p>'+
+  curious(run,s)+'<h3 style="font-size:15px;margin:14px 0 0">What the phones upload <span class=muted style="font-weight:400">(the latest request of each kind)</span></h3>'+uploads(s.uploads||{})+'</section>';
+}
+
+// ------------------------------------------------------------------ 4. cost on the phones
+function cost(s){
+ let h='<section><h2>4 · Cost on the phones <small>is it practical on a battery-powered device?</small></h2>';
+ const dc=s.device_costs||{}, cs=Object.keys(dc).sort();
+ if(!cs.length) h+='<p class=lead>The phones report this at the end of a run (time, data and battery; nothing about the user).</p>';
+ else{
+  const line=(label,f)=>row([label].concat(cs.map(c=>'<span class=num>'+f(dc[c])+'</span>')));
+  h+='<table>'+row(['measured on the phone'].concat(cs.map(c=>'phone '+c)),'th')+
+   line('Training per federated round',d=>num(d.train_ms_per_round,1)+' ms')+
+   line('Local-only model, trained from zero',d=>(d.baseline_train_ms??'–')+' ms')+
+   line('Features for one 1-second window',d=>num(d.feature_ms_per_window,3)+' ms')+
+   line('Prediction, three models, one window',d=>num(d.predict_ms_per_window,3)+' ms')+
+   line('Data sent / received',d=>kb(d.bytes_sent)+' / '+kb(d.bytes_received))+
+   line('Battery used',d=>d.charging?'<span class=muted>charging</span>':d.battery_used_mah!=null?num(d.battery_used_mah,1)+' mAh ('+d.battery_start_pct+'% → '+d.battery_end_pct+'%)':'–')+
+   line('Whole run',d=>num(d.run_s,0)+' s')+'</table>';
+ }
+ h+='<details class=detail><summary>Network traffic counted by the server</summary><table>'+row(['phone','requests','payload in','payload out','on the wire in','on the wire out'],'th');
+ for(const [c,v] of Object.entries(s.traffic)) h+=row([c,v.requests,kb(v.payload_in),kb(v.payload_out),kb(v.wire_in),kb(v.wire_out)]);
+ return h+'</table></details></section>';
+}
+
+// ------------------------------------------------------------------ 5. compare runs
+function compare(allRuns,current){
+ // runs that were started but never trained a round only clutter the table
+ const runs=allRuns.filter(r=>r.rounds_done>0||r.run_id===current), hidden=allRuns.length-runs.length;
+ let h='<section><h2>5 · Compare runs <small>plain vs secure vs compressed, one row per run</small></h2>';
+ if(!runs.length) return h+'<p class=lead>No runs yet.</p></section>';
+ h+='<p class=lead>Same accuracy in every mode; with secure aggregation the server can no longer read a phone’s model or guess its poses, and compression makes each upload about 4× smaller.</p>';
+ h+='<table>'+row(['run','mode','features','rounds','global','local A','local B','server reads one upload','curious server','upload / round','train / round','battery'],'th');
+ for(const r of runs){
+  const cls=r.run_id===current?' class=now':'';
+  h+='<tr'+cls+'>'+[r.run_id.replace('run_','')+(r.run_id===current?' <span class=pill>current</span>':''),r.mode_label,r.feature_set,r.rounds_done+' / '+r.rounds,
+   pct(r.global_acc),pct(r.local_A_acc),pct(r.local_B_acc),
+   r.server_sees_acc==null?'–':'<span class='+(privateAcc(r.server_sees_acc)?'ok':'bad')+'>'+pct(r.server_sees_acc)+'</span>',
+   r.curious_score==null?'–':'<span class='+(privateScore(r.curious_score)?'ok':'bad')+'>'+num(r.curious_score,1)+' / 6</span>',
+   kb(r.upload_bytes),r.train_ms_per_round==null?'–':num(r.train_ms_per_round,1)+' ms',
+   r.battery_used_mah==null?'–':num(r.battery_used_mah,1)+' mAh'].map((c,i)=>'<td'+(i>=4?' class=num':'')+'>'+c+'</td>').join('')+'</tr>';
+ }
+ return h+'</table><p class=muted style="font-size:13px">“Server reads one upload”: a phone’s last upload read by the server as a model, scored on the phone’s test recordings (guessing = 16.7%). Accuracies are averaged over both phones.'+
+  (hidden?' '+hidden+' run(s) with no finished round are not shown.':'')+'</p></section>';
+}
+
+// ------------------------------------------------------------------ 6. phones + new run
+function phones(s){
+ let h='<section class=detail><h2>6 · Phones</h2><table>'+row(['phone','device','participant','training windows','per pose (SU, SD, PU, PD, LL, LR)','last seen'],'th');
+ for(const [c,v] of Object.entries(s.clients)){const age=v.seconds_since_seen;
+  h+=row([c,esc(v.device||''),esc(v.participant||''),v.num_samples??'–',v.class_counts?v.class_counts.join(', '):(s.secure?'<span class=muted>hidden (secure mode)</span>':'–'),
+   '<span class='+(age<10?'ok':'muted')+'>'+age+' s ago</span>']);}
+ return h+'</table></section>';
+}
+let formShown=false;
+function showForm(s){
+ if(formShown) return; formShown=true; const cfg=s.config;
+ document.getElementById('form').innerHTML='<section><h2>Start a new run</h2><p class=lead>Phones that are training (or have “Keep following new server runs” ticked) pick it up automatically. Old runs stay on disk.</p>'+
+  '<form onsubmit="reset(event)">features <select name=fs>'+['acc','acc+grav','acc+grav+gyro','acc+grav+gyro+rot'].map(f=>'<option'+(f===cfg.feature_set?' selected':'')+'>'+f+'</option>').join('')+
+  '</select> rounds <input name=rounds type=number value='+cfg.rounds+'> seed <input name=seed type=number value='+cfg.seed+
+  '> timeout (s) <input name=to type=number value='+cfg.round_timeout_s+'> <label><input name=sec type=checkbox'+(s.secure?' checked':'')+'> secure aggregation</label>'+
+  '<label><input name=cmp type=checkbox'+(s.compressed?' checked':'')+'> + compression</label><button class=go>Start new run</button></form>'+
+  '<p class=muted style="font-size:13px">Timeout: how long a round waits for a missing phone (0 = wait forever; use 10 to demonstrate dropout).</p></section>';
+}
+async function reset(ev){
+ ev.preventDefault(); const f=ev.target;
+ if(!confirm('Start a new run? Training starts again from zero; the current run stays on disk.')) return;
+ const body={feature_set:f.fs.value,rounds:+f.rounds.value,seed:+f.seed.value,round_timeout_s:+f.to.value,
+  secure_aggregation:f.sec.checked||f.cmp.checked,compression:f.cmp.checked};
+ const r=await api('/admin/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
+ alert(r.ok?'New run started.':'Failed: '+(await r.text())); lastRuns=0; load();
+}
+
+// ------------------------------------------------------------------ load and draw
+let runsCache={runs:[],current:null}, lastRuns=0;
+async function load(){
+ let s;
+ try{
+  const r=await api('/status');
+  if(r.status===401){document.getElementById('app').innerHTML='<div class=msg>This server needs a password. <button onclick="askPassword()">Enter password</button></div>';return}
+  s=await r.json();
+  if(Date.now()-lastRuns>5000){const rr=await api('/runs'); if(rr.ok){runsCache=await rr.json(); lastRuns=Date.now()}}
+ }catch(e){document.getElementById('app').innerHTML='<div class=msg>Server not reachable.</div>';return}
+ const run=runsCache.runs.find(r=>r.run_id===s.run_id);
+ const cfg=s.config;
+ let h='<div class=strip><span class=pill>run '+s.run_id+'</span><span class=pill>features <b>'+cfg.feature_set+'</b> · '+s.n_params+' parameters</span>'+
+  '<span class="pill '+(s.secure?'on':'off')+'">'+modeLabel(s)+'</span><span class=pill>'+cfg.local_epochs+' local epoch · lr '+cfg.lr+' · seed '+cfg.seed+'</span>'+
+  (s.sweep?'<span class=pill>sweep run '+(s.sweep.index+1)+' of '+s.sweep.total+'</span>':'')+'</div>';
+ h+=headline(s,run)+training(s)+models(s.results)+privacy(s,run)+cost(s)+compare(runsCache.runs,s.run_id)+phones(s);
+ document.getElementById('app').innerHTML=h;
+ showForm(s);
+}
+load(); setInterval(load,1500);
+</script></body></html>

@@ -1,4 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Record one labelled session: choose split and pose, check the live label, then Start. -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent">
@@ -7,123 +8,133 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="vertical"
-        android:padding="20dp">
+        android:padding="16dp">
 
-        <TextView
+        <TextView style="@style/Hint"
             android:id="@+id/who"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textColor="@color/muted" />
+            android:layout_height="wrap_content" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="Data split"
-            android:textColor="@color/muted" />
-
-        <RadioGroup
-            android:id="@+id/split_group"
+        <!-- ============ what to record ============ -->
+        <LinearLayout style="@style/Card"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
+            android:layout_height="wrap_content">
 
-            <RadioButton
-                android:id="@+id/split_train"
-                android:layout_width="0dp"
+            <TextView style="@style/SectionTitle"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:checked="true"
-                android:text="Train" />
+                android:text="What to record" />
 
-            <RadioButton
-                android:id="@+id/split_val"
-                android:layout_width="0dp"
+            <RadioGroup
+                android:id="@+id/split_group"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Validation" />
+                android:layout_marginTop="4dp"
+                android:orientation="horizontal">
 
-            <RadioButton
-                android:id="@+id/split_test"
-                android:layout_width="0dp"
+                <RadioButton
+                    android:id="@+id/split_train"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:checked="true"
+                    android:text="Train" />
+
+                <RadioButton
+                    android:id="@+id/split_val"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Validation" />
+
+                <RadioButton
+                    android:id="@+id/split_test"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Test" />
+            </RadioGroup>
+
+            <TextView style="@style/Hint"
+                android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:text="Test" />
-        </RadioGroup>
+                android:layout_marginTop="8dp"
+                android:text="Pose (Train: only this client's three poses)" />
 
-        <TextView
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="Pose"
-            android:textColor="@color/muted" />
+            <Spinner
+                android:id="@+id/pose"
+                android:layout_width="match_parent"
+                android:layout_height="48dp" />
 
-        <Spinner
-            android:id="@+id/pose"
-            android:layout_width="match_parent"
-            android:layout_height="48dp" />
-
-        <TextView
-            android:id="@+id/pose_desc"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:textStyle="italic" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:orientation="horizontal">
+            <TextView
+                android:id="@+id/pose_desc"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:textStyle="italic" />
 
             <LinearLayout
-                android:layout_width="0dp"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
+                android:layout_marginTop="8dp"
+                android:orientation="horizontal">
 
-                <TextView
-                    android:layout_width="wrap_content"
+                <LinearLayout
+                    android:layout_width="0dp"
                     android:layout_height="wrap_content"
-                    android:text="How is it held?"
-                    android:textColor="@color/muted" />
+                    android:layout_weight="1"
+                    android:orientation="vertical">
 
-                <Spinner
-                    android:id="@+id/holding"
-                    android:layout_width="match_parent"
-                    android:layout_height="48dp" />
+                    <TextView style="@style/Hint"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="How is it held?" />
+
+                    <Spinner
+                        android:id="@+id/holding"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp" />
+                </LinearLayout>
+
+                <LinearLayout
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:orientation="vertical">
+
+                    <TextView style="@style/Hint"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:text="Duration" />
+
+                    <Spinner
+                        android:id="@+id/duration"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp" />
+                </LinearLayout>
             </LinearLayout>
 
-            <LinearLayout
-                android:layout_width="0dp"
+            <TextView style="@style/Hint"
+                android:id="@+id/counts"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_weight="1"
-                android:orientation="vertical">
-
-                <TextView
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Duration"
-                    android:textColor="@color/muted" />
-
-                <Spinner
-                    android:id="@+id/duration"
-                    android:layout_width="match_parent"
-                    android:layout_height="48dp" />
-            </LinearLayout>
+                android:layout_marginTop="6dp" />
         </LinearLayout>
 
-        <LinearLayout
+        <!-- ============ live label check ============ -->
+        <LinearLayout style="@style/Card"
             android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:background="@color/panel"
-            android:orientation="vertical"
-            android:padding="12dp">
+            android:layout_height="wrap_content">
+
+            <TextView style="@style/SectionTitle"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Label check" />
 
             <TextView
                 android:id="@+id/live_pose"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
                 android:textSize="20sp"
                 android:textStyle="bold" />
 
@@ -136,6 +147,7 @@
                 android:textSize="12sp" />
         </LinearLayout>
 
+        <!-- ============ record ============ -->
         <TextView
             android:id="@+id/status"
             android:layout_width="match_parent"
@@ -146,11 +158,12 @@
             android:textSize="26sp"
             android:textStyle="bold" />
 
-        <Button
+        <Button style="@style/Button.Primary"
             android:id="@+id/start"
             android:layout_width="match_parent"
-            android:layout_height="72dp"
+            android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
+            android:minHeight="72dp"
             android:text="Start recording"
             android:textSize="20sp" />
 
@@ -161,19 +174,10 @@
             android:enabled="false"
             android:text="Cancel" />
 
-        <TextView
-            android:id="@+id/counts"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:textColor="@color/muted" />
-
-        <TextView
+        <TextView style="@style/Hint"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
-            android:text="Tip: after you press Start you have 3 beeps to put the phone in the pose. A long beep starts the recording; a double beep ends it. The first and last second are ignored, so you can move into and out of the pose then. Vary the tilt slightly, the surface, and in-hand vs. resting between sessions."
-            android:textColor="@color/muted"
-            android:textSize="12sp" />
+            android:text="After Start you have 3 beeps to put the phone in the pose. A long beep starts the recording, a double beep ends it. The first and last second are ignored, so you can move into and out of the pose then. Vary the tilt, the surface and in-hand vs resting between sessions." />
     </LinearLayout>
 </ScrollView>

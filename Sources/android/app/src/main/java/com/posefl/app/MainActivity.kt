@@ -70,13 +70,15 @@ class MainActivity : Activity() {
             savePrefs()
             startActivity(Intent(this, PredictActivity::class.java))
         }
+        findViewById<Button>(R.id.open_actions).setOnClickListener {
+            startActivity(Intent(this, PoseActionsActivity::class.java))
+        }
 
         val rec = SensorRecorder(this)
         findViewById<TextView>(R.id.sensors).text =
-            "Device: ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}\n" +
+            "Pose FL ${BuildConfig.VERSION_NAME} · ${Build.MANUFACTURER} ${Build.MODEL}, Android ${Build.VERSION.RELEASE}\n" +
                 "Sensors: ${rec.availableSensors()}\n" +
-                "App ${BuildConfig.VERSION_NAME} · baseline features: ${FeatureSets.BASELINE} " +
-                "(${FeatureSets.size(FeatureSets.BASELINE)} features)"
+                "Baseline features: ${FeatureSets.BASELINE} (${FeatureSets.size(FeatureSets.BASELINE)} numbers per window)"
     }
 
     override fun onPause() {
@@ -98,8 +100,8 @@ class MainActivity : Activity() {
 
     private fun showTrainPoses() {
         val c = prefs.clientId
-        trainPoses.text = "Client $c trains on: " + Pose.trainPosesFor(c).joinToString(", ") { it.label } +
-            "\nValidation and test sessions use all six poses."
+        trainPoses.text = "Trains on: " + Pose.trainPosesFor(c).joinToString(", ") { it.label } +
+            "\nValidation and test recordings use all six poses."
     }
 
     private fun testServer() {
@@ -125,8 +127,8 @@ class MainActivity : Activity() {
                     "Enter the password it was started with." else "Server error ${e.code}: ${e.message}")
             } catch (e: Exception) {
                 false to ("Could not reach the server: ${e.message ?: e.javaClass.simpleName}\n" +
-                    "Check that fl_server.py is running, the phone and computer are on the same Wi-Fi, " +
-                    "and the URL matches the one the server printed.")
+                    "Check that the server is running and the address matches the one it printed " +
+                    "(on Google Cloud it starts with https://).")
             }
             ui.post {
                 serverStatus.setTextColor(getColor(if (ok) R.color.ok else R.color.bad))

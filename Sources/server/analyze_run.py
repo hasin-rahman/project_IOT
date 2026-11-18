@@ -24,6 +24,8 @@ import statistics
 import sys
 import time
 
+import curious_server
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 POSES = ["Screen Up", "Screen Down", "Portrait Up", "Portrait Down", "Landscape Left", "Landscape Right"]
 SHORT = ["SU", "SD", "PU", "PD", "LL", "LR"]
@@ -55,8 +57,15 @@ def load_run(d):
     if os.path.exists(os.path.join(d, "traffic.json")):
         with open(os.path.join(d, "traffic.json")) as fh:
             traffic = json.load(fh)
+    costs = {}
+    for cid in ("A", "B"):
+        path = os.path.join(d, f"device_cost_{cid}.json")
+        if os.path.exists(path):
+            with open(path) as fh:
+                costs[cid] = json.load(fh)
     return {"dir": d, "id": os.path.basename(os.path.normpath(d)), "config": cfg, "rounds": rounds,
-            "metrics": metrics, "traffic": traffic,
+            "metrics": metrics, "traffic": traffic, "costs": costs,
+            "attack": curious_server.attack_run(d),
             "discarded": read_jsonl(os.path.join(d, "discarded_rounds.jsonl"))}
 
 
@@ -192,11 +201,16 @@ def main():
         md.append("\n## Secure aggregation compared with plain FedAvg\n")
         md.append("*One upload as the server sees it*: each phone scores its own last upload the way the server "
                   "received it. In plain FedAvg that is a working model; with secure aggregation it is masked noise "
-                  "(guessing among six poses is 16.7%).\n")
+                  "(guessing among six poses is 16.7%; a random model often picks one or two poses, so single runs "
+                  "vary widely and only the mean over several seeds is meaningful).\n")
         eval_set = "test" if "test" in sets else (sets[0] if sets else "test")
         rows = []
-        for secure in (False, True):
-            rs = [r for r in runs if bool(r["config"].get("secure_aggregation")) == secure]
+        def mode_of(r):
+            if not r["config"].get("secure_aggregation"):
+                return "plain FedAvg"
+            return "compressed secure aggregation" if r["config"].get("compression") else "secure aggregation"
+        for mode in ("plain FedAvg", "secure aggregation", "compressed secure aggregation"):
+            rs = [r for r in runs if mode_of(r) == mode]
             if not rs:
                 continue
             sizes, secs = [], []
@@ -206,7 +220,7 @@ def main():
                 if n_up:
                     sizes.append(up / n_up)
                 secs += [x["duration_s"] for x in r["rounds"] if isinstance(x.get("duration_s"), (int, float))]
-            rows.append(["secure aggregation" if secure else "plain FedAvg", len(rs),
+            rows.append([mode, len(rs),
                          fmt(*mean_sd(collect(rs, "global", eval_set))),
                          fmt(*mean_sd(collect(rs, "server_sees", eval_set))),
                          f"{statistics.mean(sizes):.0f} B" if sizes else "-",
@@ -217,6 +231,37 @@ def main():
                             "one upload as the server sees it", "update size (JSON)",
                             "time from first to last update of a round", "rounds discarded and repeated",
                             "rounds averaged with a phone missing"], rows))
+
+    # ---------- 5. curious server and cost on the phones (extra credit) ----------
+    def mode_name(r):
+        if not r["config"].get("secure_aggregation"):
+            return "plain FedAvg"
+        return "compressed secure aggregation" if r["config"].get("compression") else "secure aggregation"
+    if any(r["attack"]["average_score"] is not None for r in runs):
+        md.append("\n## Curious server: what one upload reveals, and what it costs on the phone\n")
+        md.append("*Curious-server attack* (curious_server.py): for every update the server compares the uploaded "
+                  "bias of each pose with the bias of the model it sent and guesses that the phone has the poses "
+                  "whose bias went up. Score = poses classified right out of 6, per upload (random guessing: 3). "
+                  "*Per-pose counts*: whether the uploads also carried class_counts, which give the answer away. "
+                  "Costs are measured on the phones (train time per round, three-model prediction per window, "
+                  "battery from the charge counter; runs while charging are left out).\n")
+        rows = []
+        for mode in ("plain FedAvg", "secure aggregation", "compressed secure aggregation"):
+            rs = [r for r in runs if mode_name(r) == mode and r["attack"]["average_score"] is not None]
+            if not rs:
+                continue
+            costs = [c for r in rs for c in r["costs"].values()]
+            def cost_mean(key, unit, digits):
+                vals = [c[key] for c in costs if isinstance(c.get(key), (int, float))
+                        and not (key == "battery_used_mah" and c.get("charging"))]
+                return f"{statistics.mean(vals):.{digits}f} {unit}" if vals else "-"
+            rows.append([mode, len(rs),
+                         "{:.1f} ± {:.1f} / 6".format(*mean_sd([r["attack"]["average_score"] for r in rs])),
+                         "visible" if any(r["attack"]["label_counts_visible"] for r in rs) else "hidden",
+                         cost_mean("train_ms_per_round", "ms", 2), cost_mean("predict_ms_per_window", "ms", 3),
+                         cost_mean("battery_used_mah", "mAh", 1)])
+        md.append(md_table(["mode", "runs", "curious-server score per upload", "per-pose counts",
+                            "train time per round", "prediction per window", "battery per run"], rows))
 
     # ---------- results.csv ----------
     with open(os.path.join(out, "results.csv"), "w", newline="") as fh:
